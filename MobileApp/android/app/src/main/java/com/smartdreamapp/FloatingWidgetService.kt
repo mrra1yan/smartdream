@@ -262,7 +262,7 @@ class FloatingWidgetService : Service() {
             settings.setSupportMultipleWindows(false)
             settings.javaScriptCanOpenWindowsAutomatically = true
             // Video ads must auto-play without user gesture.
-            settings.mediaPlaybackRequiresUserAction = false
+            settings.mediaPlaybackRequiresUserGesture = false
             // Use a clean Chrome user-agent — ad networks detect and block
             // custom WebView identifiers like "SmartDreamApp".
             settings.userAgentString =
