@@ -91,7 +91,7 @@ class FloatingWidgetService : Service() {
             dpToPx(110), // 110dp width footprint (matching Ad Container width)
             dpToPx(178), // Default 1 slot height (16dp header + 2dp padding + 160dp slot)
             layoutType,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON,
             PixelFormat.TRANSLUCENT
         ).apply {
             gravity = Gravity.TOP or Gravity.START
