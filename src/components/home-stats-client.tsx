@@ -78,7 +78,8 @@ export function HomeStatsClient({
       if (!cancelled && newStats) {
         setStats((prev) => ({
           ...newStats,
-          givenToday: Math.max(prev.givenToday, newStats.givenToday),
+          // Overwrite strictly to allow rolling back failed optimistic +1s
+          givenToday: newStats.givenToday,
           receivedToday: Math.max(prev.receivedToday, newStats.receivedToday),
         }));
       }

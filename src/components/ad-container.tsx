@@ -250,6 +250,8 @@ function AdModal({
             return;
           }
         }
+      } else if (data.type === "HEARTBEAT") {
+        useAdStore.getState().tickHeartbeat();
       }
 
       if (data.type === "AD_DISMISSED" && data.linkId === linkId) {

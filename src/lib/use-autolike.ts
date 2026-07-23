@@ -36,6 +36,7 @@ export function useAutoLike() {
   const fetchFailStreakRef = useRef(0);
   const offsetRef = useRef(0);
   const noNewLinksStreakRef = useRef(0);
+  const heartbeatListenerRef = useRef<((event: any) => void) | null>(null);
 
   const enqueue = useAdStore((s) => s.enqueue);
 
@@ -138,6 +139,11 @@ export function useAutoLike() {
     runningRef.current = false;
     setRunning(false);
     setRetrying(false);
+    if (heartbeatListenerRef.current) {
+      window.removeEventListener("message", heartbeatListenerRef.current);
+      (document as any).removeEventListener("message", heartbeatListenerRef.current);
+      heartbeatListenerRef.current = null;
+    }
   }, []);
 
   const pause = useCallback(async () => {
@@ -251,9 +257,11 @@ export function useAutoLike() {
       const retryCountRef = { current: 0 };
       const waitingForRetryRef = { current: false };
       const fetchingRef = { current: false };
+      const lastLoopTimeRef = { current: Date.now() };
 
       const loop = async () => {
         if (!runningRef.current) return;
+        lastLoopTimeRef.current = Date.now();
 
         if (useAdStore.getState().adBlockerDetected) {
           stop();
@@ -405,6 +413,24 @@ export function useAutoLike() {
           setTimeout(loop, 1000);
         }
       };
+
+      if (!heartbeatListenerRef.current) {
+        heartbeatListenerRef.current = (event: any) => {
+          try {
+            let data = event.data;
+            while (typeof data === "string") {
+              try { data = JSON.parse(data); } catch { break; }
+            }
+            if (data && data.type === "HEARTBEAT" && runningRef.current) {
+              if (Date.now() - lastLoopTimeRef.current >= 900) {
+                loop();
+              }
+            }
+          } catch { }
+        };
+        window.addEventListener("message", heartbeatListenerRef.current);
+        (document as any).addEventListener("message", heartbeatListenerRef.current);
+      }
 
       loop();
     },

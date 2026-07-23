@@ -28,6 +28,7 @@ type AdStore = {
   dismiss: (linkId: string) => void;
   markLoaded: (linkId: string) => void;
   clearAll: () => void;
+  tickHeartbeat: () => void;
 };
 
 // ── Timer helpers ──────────────────────────────────────────────────────
@@ -288,6 +289,23 @@ export const useAdStore = create<AdStore>((set, get) => {
       }
       set({ active: [], queue: [] });
       teardownSafetyInterval();
+    },
+
+    tickHeartbeat: () => {
+      const { active } = get();
+      const now = Date.now();
+      for (const ad of active) {
+        if (
+          ad.startedAt > 0 &&
+          ad.token &&
+          !finalisingIds.has(ad.linkId) &&
+          now - ad.startedAt >= TOTAL_AD_SECONDS * 1000
+        ) {
+          finalisingIds.add(ad.linkId);
+          clearTimer(ad.linkId);
+          void commitAndFinalise(ad.linkId, ad.token, ad.source);
+        }
+      }
     },
   };
 });
