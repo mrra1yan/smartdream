@@ -74,7 +74,7 @@ export async function commitLikeAction(
   }
 
   const elapsedMs = Date.now() - claims.startedAtMs;
-  const MIN_ELAPSED_MS = Math.max(1000, (TOTAL_AD_SECONDS - 1) * 1000);
+  const MIN_ELAPSED_MS = 7000; // 7 seconds min required to prevent false rejections from timer drift
   if (elapsedMs < MIN_ELAPSED_MS) {
     console.warn(`[commitLikeAction] Ad view duration too short: ${elapsedMs}ms (min required: ${MIN_ELAPSED_MS}ms)`);
     return { ok: false, error: "ad not fully viewed" };
@@ -122,10 +122,9 @@ export async function commitLikeAction(
     return { ok: false, error: "owner_not_found" };
   }
 
-  // 3. Burst cap: at most 6 likes in last 12 seconds
+  // 3. Burst cap: at most 10 likes in last 12 seconds
   // With TOTAL_AD_SECONDS=9 and MAX_CONCURRENT_ADS=3, up to 3 ads can
-  // complete within a tight window — the old 4-in-3s cap was too aggressive
-  // and rejected legitimate concurrent completions.
+  // complete within a tight window — 10 in 12s accommodates 3 concurrent slots safely.
   const burstWindow = new Date(Date.now() - 12000).toISOString();
   const { count: burstCount } = await supabase
     .from("likes")
@@ -133,7 +132,7 @@ export async function commitLikeAction(
     .eq("liker_id", user.id)
     .gte("created_at", burstWindow);
 
-  if ((burstCount ?? 0) >= 6) {
+  if ((burstCount ?? 0) >= 10) {
     console.warn("[commitLikeAction] Burst cap hit:", burstCount, "likes in last 12s for user:", user.id);
     return { ok: false, error: "burst_cap" };
   }
