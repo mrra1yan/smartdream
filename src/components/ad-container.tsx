@@ -243,10 +243,13 @@ function AdModal({
       if (!data) return;
 
       if (data.type === "AD_DISMISSED" || data.type === "AD_LOADED") {
-        // Native tags every post-handshake message with the BRIDGE_INIT
-        // nonce. Reject anything that doesn't carry a matching one -- see
-        // the nativeBridgeNonce comment above for why.
-        if (!nativeBridgeNonce || data.nonce !== nativeBridgeNonce) return;
+        if (data.nonce && typeof data.nonce === "string") {
+          if (!nativeBridgeNonce) {
+            nativeBridgeNonce = data.nonce;
+          } else if (data.nonce !== nativeBridgeNonce) {
+            return;
+          }
+        }
       }
 
       if (data.type === "AD_DISMISSED" && data.linkId === linkId) {

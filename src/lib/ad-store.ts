@@ -123,13 +123,6 @@ async function commitAndFinalise(
   token: string,
   source?: "boosted",
 ) {
-  // ── Optimistic UI update ──────────────────────────────────────────
-  // Dispatch immediately so the stats card increments at the 7 s mark,
-  // not 8-9 s later when the server finally responds.
-  if (typeof window !== "undefined" && source !== "boosted") {
-    window.dispatchEvent(new Event("stats_updated"));
-  }
-
   // ── Server commit (background) ────────────────────────────────────
   let ok = false;
 
@@ -144,9 +137,10 @@ async function commitAndFinalise(
     }
   }
 
-  // If the server rejected, fire stats_sync so the optimistic +1 above
-  // gets corrected by a fresh server fetch.
-  if (!ok && typeof window !== "undefined") {
+  // Dispatch stats_updated ONLY when the server confirms successful DB insertion
+  if (ok && typeof window !== "undefined" && source !== "boosted") {
+    window.dispatchEvent(new Event("stats_updated"));
+  } else if (!ok && typeof window !== "undefined") {
     window.dispatchEvent(new Event("stats_sync"));
   }
 
