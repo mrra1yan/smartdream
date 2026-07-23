@@ -138,8 +138,8 @@ class FloatingWidgetService : Service() {
         val toggleBtn = TextView(this).apply {
             text = "━"
             setTextColor(Color.LTGRAY)
-            textSize = 9f
-            setPadding(dpToPx(2), 0, dpToPx(2), 0)
+            textSize = 12f
+            setPadding(dpToPx(6), dpToPx(2), dpToPx(6), dpToPx(2))
             setOnClickListener {
                 toggleCollapse()
             }
@@ -148,8 +148,8 @@ class FloatingWidgetService : Service() {
         val closeBtn = TextView(this).apply {
             text = "✕"
             setTextColor(Color.parseColor("#EF4444"))
-            textSize = 9f
-            setPadding(dpToPx(1), 0, dpToPx(1), 0)
+            textSize = 12f
+            setPadding(dpToPx(6), dpToPx(2), dpToPx(6), dpToPx(2))
             setOnClickListener {
                 stopSelf()
             }
@@ -159,10 +159,8 @@ class FloatingWidgetService : Service() {
         header.addView(toggleBtn)
         header.addView(closeBtn)
 
-        // WebViews Container (Stacked vertically one below another)
-        webViewContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(0, dpToPx(1), 0, dpToPx(1))
+        // Wrap WebViews in a FrameLayout to add a transparent touch overlay
+        val webViewWrapper = android.widget.FrameLayout(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
@@ -170,8 +168,31 @@ class FloatingWidgetService : Service() {
             )
         }
 
+        // WebViews Container (Stacked vertically one below another)
+        webViewContainer = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(0, dpToPx(1), 0, dpToPx(1))
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+            )
+        }
+
+        // Transparent overlay to intercept touches for dragging/clicking the entire widget body
+        val touchOverlay = View(this).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT
+            )
+            isClickable = true
+            isFocusable = true
+        }
+
+        webViewWrapper.addView(webViewContainer)
+        webViewWrapper.addView(touchOverlay)
+
         mainContainer.addView(header)
-        mainContainer.addView(webViewContainer)
+        mainContainer.addView(webViewWrapper)
 
         floatingView = mainContainer
         try {
@@ -180,30 +201,52 @@ class FloatingWidgetService : Service() {
             e.printStackTrace()
         }
 
-        // Dragging Touch Listener
+        // Unified Drag & Click Touch Listener for Header and Body Overlay
         var initialX = 0
         var initialY = 0
         var initialTouchX = 0f
         var initialTouchY = 0f
+        var isDragging = false
 
-        header.setOnTouchListener { _, event ->
+        val dragAndClickListener = View.OnTouchListener { _, event ->
             when (event.action) {
                 MotionEvent.ACTION_DOWN -> {
                     initialX = params.x
                     initialY = params.y
                     initialTouchX = event.rawX
                     initialTouchY = event.rawY
+                    isDragging = false
                     true
                 }
                 MotionEvent.ACTION_MOVE -> {
-                    params.x = initialX + (event.rawX - initialTouchX).toInt()
-                    params.y = initialY + (event.rawY - initialTouchY).toInt()
-                    windowManager.updateViewLayout(floatingView, params)
+                    val dx = (event.rawX - initialTouchX).toInt()
+                    val dy = (event.rawY - initialTouchY).toInt()
+                    if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
+                        isDragging = true
+                    }
+                    if (isDragging) {
+                        params.x = initialX + dx
+                        params.y = initialY + dy
+                        windowManager.updateViewLayout(floatingView, params)
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!isDragging) {
+                        // Launch the app on tap
+                        val intent = Intent(this@FloatingWidgetService, MainActivity::class.java).apply {
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                        }
+                        startActivity(intent)
+                    }
                     true
                 }
                 else -> false
             }
         }
+
+        header.setOnTouchListener(dragAndClickListener)
+        touchOverlay.setOnTouchListener(dragAndClickListener)
     }
 
     private fun createSlotView(url: String, linkId: String): SlotView {
@@ -300,6 +343,22 @@ class FloatingWidgetService : Service() {
             }
 
             webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView?, url: String?) {
+                    super.onPageFinished(view, url)
+                    view?.evaluateJavascript("""
+                        (function() {
+                            var muteAll = function() {
+                                var v = document.getElementsByTagName('video');
+                                for(var i=0; i<v.length; i++) { v[i].muted = true; }
+                                var a = document.getElementsByTagName('audio');
+                                for(var i=0; i<a.length; i++) { a[i].muted = true; }
+                            };
+                            muteAll();
+                            setInterval(muteAll, 1000);
+                        })();
+                    """.trimIndent(), null)
+                }
+
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: android.webkit.WebResourceRequest?,
