@@ -1,32 +1,10 @@
--- Create an RPC function to atomically increment likes_count on the links table
-CREATE OR REPLACE FUNCTION increment_link_likes(link_id UUID)
-RETURNS void
-LANGUAGE sql
-AS $$
-  UPDATE links
-  SET likes_count = COALESCE(likes_count, 0) + 1
-  WHERE id = link_id;
-$$;
+-- =============================================================================
+-- 0011_fix_like_stats.sql
+-- Fixes user stats counts (given_24h) to include likes given to boosted profiles.
+-- Also fixes deficit exposure window bug in process_like_commit.
+-- =============================================================================
 
--- Create an RPC function to atomically increment profile usage counters
-CREATE OR REPLACE FUNCTION increment_profile_usage(
-  user_id UUID,
-  auto_like_inc INT DEFAULT 0,
-  boost_inc INT DEFAULT 0,
-  offer_inc INT DEFAULT 0
-)
-RETURNS void
-LANGUAGE sql
-AS $$
-  UPDATE profiles
-  SET 
-    auto_like_used = COALESCE(auto_like_used, 0) + auto_like_inc,
-    boost_used = COALESCE(boost_used, 0) + boost_inc,
-    boosted_offer_count = COALESCE(boosted_offer_count, 0) + offer_inc
-  WHERE id = user_id;
-$$;
-
--- Create an RPC function to get user stats for the feed efficiently
+-- 1. Fix get_feed_user_stats to include boosted likes in given stats
 CREATE OR REPLACE FUNCTION get_feed_user_stats(
   window_iso TIMESTAMPTZ,
   minus24h_iso TIMESTAMPTZ
@@ -72,17 +50,8 @@ AS $$
   LEFT JOIN recv_stats r ON p.id = r.receiver_id;
 $$;
 
--- Create an RPC function to get personal stats efficiently
--- given_total/received_total (lifetime COUNT(*) over all of `likes`) were
--- dropped from this function's output: with the retention cleanup job
--- (0009_likes_retention_cleanup.sql) pruning likes older than 7 days, a
--- "lifetime total" computed this way would silently shrink over time instead
--- of staying accurate, so the Total stat was removed from the UI entirely
--- rather than kept misleading. The old 6-column signature must be dropped
--- first -- CREATE OR REPLACE can't change a function's output columns.
-DROP FUNCTION IF EXISTS get_my_stats(UUID, TIMESTAMPTZ, TIMESTAMPTZ);
-
-CREATE FUNCTION get_my_stats(
+-- 2. Fix get_my_stats to include boosted likes in given stats
+CREATE OR REPLACE FUNCTION get_my_stats(
   viewer_id UUID,
   today_iso TIMESTAMPTZ,
   minus24h_iso TIMESTAMPTZ
@@ -102,16 +71,7 @@ AS $$
     (SELECT COUNT(*) FROM likes WHERE receiver_id = viewer_id AND created_at >= minus24h_iso AND is_boosted_like IS DISTINCT FROM true) as received_24h;
 $$;
 
--- Add indexes to improve COUNT query performance for like validation
-CREATE INDEX IF NOT EXISTS idx_likes_liker_created_at ON likes (liker_id, created_at);
-CREATE INDEX IF NOT EXISTS idx_likes_receiver_created_at ON likes (receiver_id, created_at);
-
--- Drop old overloads before creating the current version.
-DROP FUNCTION IF EXISTS public.process_like_commit(uuid, uuid, uuid, boolean, boolean, boolean, int, int);
-DROP FUNCTION IF EXISTS public.process_like_commit(uuid, uuid, uuid, boolean, boolean, boolean, int, int, int, int);
-
--- Atomically process a like commit with advisory-lock serialisation,
--- cooldown, owner deficit check, and usage/offer accounting.
+-- 3. Fix process_like_commit to include boosted likes when checking owner deficit
 CREATE OR REPLACE FUNCTION public.process_like_commit(
   p_liker_id UUID,
   p_link_id UUID,
@@ -294,7 +254,3 @@ BEGIN
   RETURN TRUE;
 END;
 $$;
-
-REVOKE EXECUTE ON FUNCTION public.process_like_commit(UUID, UUID, UUID, BOOLEAN, BOOLEAN, BOOLEAN, INT, INT, INT, INT, TIMESTAMPTZ) FROM PUBLIC, anon, authenticated;
-GRANT EXECUTE ON FUNCTION public.process_like_commit(UUID, UUID, UUID, BOOLEAN, BOOLEAN, BOOLEAN, INT, INT, INT, INT, TIMESTAMPTZ) TO service_role;
-

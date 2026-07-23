@@ -158,13 +158,16 @@ export async function commitLikeAction(
       ((ownerRecvTotal ?? 0) < settings.active_like_count);
 
     if (!isOwnerNewUser) {
-      const windowIso = bangladeshMidnightISO();
+      // Use rolling window to match the RPC process_like_commit instead of midnight
+      const activeWindowHours = settings.active_window_hours ?? 24;
+      const windowIso = new Date(Date.now() - activeWindowHours * 3600000).toISOString();
 
       const [{ count: given24 }, { count: recv24 }] = await Promise.all([
+        // Count ALL likes given by the owner, including to boosted profiles
         supabase.from("likes").select("*", { count: "exact", head: true })
           .eq("liker_id", owner.id)
-          .eq("is_boosted_like", false)
           .gte("created_at", windowIso),
+        // Only count organic likes received, boosted likes are "free"
         supabase.from("likes").select("*", { count: "exact", head: true })
           .eq("receiver_id", owner.id)
           .eq("is_boosted_like", false)
