@@ -74,7 +74,9 @@ export async function commitLikeAction(
   }
 
   const elapsedMs = Date.now() - claims.startedAtMs;
-  const MIN_ELAPSED_MS = 9000; // 9 seconds min required to prevent false rejections from timer drift
+  // We need a generous grace period (e.g. 1-2s) because the client's 9s timer 
+  // starts *before* the network request to issue the token reaches the server.
+  const MIN_ELAPSED_MS = 7500; 
   if (elapsedMs < MIN_ELAPSED_MS) {
     console.warn(`[commitLikeAction] Ad view duration too short: ${elapsedMs}ms (min required: ${MIN_ELAPSED_MS}ms)`);
     return { ok: false, error: "ad not fully viewed" };
