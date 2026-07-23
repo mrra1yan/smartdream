@@ -163,7 +163,8 @@ class FloatingWidgetService : Service() {
             setPadding(0, dpToPx(1), 0, dpToPx(1))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT
+                0,
+                1f
             )
         }
 
@@ -240,7 +241,8 @@ class FloatingWidgetService : Service() {
         val wv = WebView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.MATCH_PARENT
+                0,
+                1f
             )
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
@@ -249,12 +251,19 @@ class FloatingWidgetService : Service() {
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 SmartDreamApp/1.0"
-            // Block all navigation — floating ads must never redirect away
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
                     request: android.webkit.WebResourceRequest?,
-                ): Boolean = true
+                ): Boolean {
+                    val reqUrl = request?.url?.toString() ?: return false
+                    // Allow HTTP/HTTPS ad page loading and redirects
+                    if (reqUrl.startsWith("http://") || reqUrl.startsWith("https://")) {
+                        return false
+                    }
+                    // Block custom intent/app schemes (e.g. market://, intent://)
+                    return true
+                }
             }
         }
 
