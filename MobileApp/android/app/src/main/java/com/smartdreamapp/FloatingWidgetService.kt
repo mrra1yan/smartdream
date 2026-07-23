@@ -28,8 +28,10 @@ class FloatingWidgetService : Service() {
     private lateinit var windowManager: WindowManager
     private var floatingView: View? = null
     private var webViewContainer: LinearLayout? = null
+    private var windowParams: WindowManager.LayoutParams? = null
     private val slotViews = mutableListOf<SlotView>()
     private var isCollapsed = false
+    private var activeSlotCount = 0
 
     private data class SlotView(
         val container: LinearLayout,
@@ -84,8 +86,8 @@ class FloatingWidgetService : Service() {
         }
 
         val params = WindowManager.LayoutParams(
-            dpToPx(145), // 145dp width footprint
-            dpToPx(80),  // 80dp height footprint
+            dpToPx(110), // 110dp width footprint (matching Ad Container width)
+            dpToPx(178), // Default 1 slot height (16dp header + 2dp padding + 160dp slot)
             layoutType,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
             PixelFormat.TRANSLUCENT
@@ -94,6 +96,7 @@ class FloatingWidgetService : Service() {
             x = 20
             y = 100
         }
+        windowParams = params
 
         // Rounded background drawable for main container
         val mainBg = GradientDrawable().apply {
@@ -154,14 +157,13 @@ class FloatingWidgetService : Service() {
         header.addView(toggleBtn)
         header.addView(closeBtn)
 
-        // WebViews Container (3 horizontal columns side-by-side)
+        // WebViews Container (Stacked vertically one below another)
         webViewContainer = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
+            orientation = LinearLayout.VERTICAL
             setPadding(0, dpToPx(1), 0, dpToPx(1))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
+                LinearLayout.LayoutParams.WRAP_CONTENT
             )
         }
 
@@ -205,11 +207,10 @@ class FloatingWidgetService : Service() {
         val cardContainer = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
-                0,
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                1f
+                dpToPx(160) // 160dp height per ad container
             ).apply {
-                setMargins(dpToPx(1), 0, dpToPx(1), 0)
+                setMargins(0, dpToPx(1), 0, dpToPx(1))
             }
             setBackgroundColor(Color.parseColor("#27272A"))
         }
@@ -267,14 +268,28 @@ class FloatingWidgetService : Service() {
         return SlotView(cardContainer, wv, slotTitle, linkId, url)
     }
 
-    private fun toggleCollapse() {
+    private fun updateWindowDimensions() {
+        val params = windowParams ?: return
+        params.width = dpToPx(110)
         if (isCollapsed) {
-            webViewContainer?.visibility = View.VISIBLE
-            isCollapsed = false
+            params.height = dpToPx(16)
         } else {
-            webViewContainer?.visibility = View.GONE
-            isCollapsed = true
+            val count = activeSlotCount.coerceAtLeast(1)
+            params.height = dpToPx(16 + 2 + (count * 160))
         }
+        if (floatingView != null) {
+            try {
+                windowManager.updateViewLayout(floatingView, params)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+    }
+
+    private fun toggleCollapse() {
+        isCollapsed = !isCollapsed
+        webViewContainer?.visibility = if (isCollapsed) View.GONE else View.VISIBLE
+        updateWindowDimensions()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -292,6 +307,8 @@ class FloatingWidgetService : Service() {
                 stopSelf()
                 return START_NOT_STICKY
             }
+
+            activeSlotCount = count
 
             for (i in 0 until count) {
                 val obj = jsonArray.optJSONObject(i) ?: continue
@@ -324,6 +341,8 @@ class FloatingWidgetService : Service() {
                     slot.currentUrl = "about:blank"
                 }
             }
+
+            updateWindowDimensions()
         } catch (e: Exception) {
             e.printStackTrace()
         }
