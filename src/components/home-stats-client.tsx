@@ -58,22 +58,24 @@ export function HomeStatsClient({
           }
         )
         .subscribe((status) => {
-          // Postgres Realtime doesn't replay events missed while disconnected
-          // -- fires on the initial subscribe AND on every automatic
-          // reconnect after a dropped WebSocket (network switch, screen
-          // lock/unlock, backgrounding), so a resync here is what actually
-          // makes this "real-time" rather than just "real-time until the
-          // first blip."
           if (status === "SUBSCRIBED") {
-            void getMyStatsAction().then(setStats);
+            void getMyStatsAction().then(updateStats);
           }
         });
     })();
 
+    const updateStats = (newStats: UserStats | null) => {
+      if (!cancelled && newStats) {
+        setStats((prev) => ({
+          ...newStats,
+          givenToday: Math.max(prev.givenToday, newStats.givenToday),
+          receivedToday: Math.max(prev.receivedToday, newStats.receivedToday),
+        }));
+      }
+    };
+
     const handleFocus = () => {
-      void getMyStatsAction().then((newStats) => {
-        if (!cancelled && newStats) setStats(newStats);
-      });
+      void getMyStatsAction().then(updateStats);
     };
 
     let statsUpdateTimeout: NodeJS.Timeout | null = null;
@@ -89,15 +91,7 @@ export function HomeStatsClient({
       // never overwrites a higher optimistic count.
       if (statsUpdateTimeout) clearTimeout(statsUpdateTimeout);
       statsUpdateTimeout = setTimeout(() => {
-        void getMyStatsAction().then((newStats) => {
-          if (!cancelled && newStats) {
-            setStats((prev) => ({
-              ...newStats,
-              givenToday: Math.max(prev.givenToday, newStats.givenToday),
-              receivedToday: Math.max(prev.receivedToday, newStats.receivedToday),
-            }));
-          }
-        });
+        void getMyStatsAction().then(updateStats);
       }, 2000);
     };
 
@@ -107,9 +101,7 @@ export function HomeStatsClient({
     const handleStatsSync = () => {
       if (statsSyncTimeout) clearTimeout(statsSyncTimeout);
       statsSyncTimeout = setTimeout(() => {
-        void getMyStatsAction().then((newStats) => {
-          if (!cancelled && newStats) setStats(newStats);
-        });
+        void getMyStatsAction().then(updateStats);
       }, 1500);
     };
 
@@ -119,9 +111,7 @@ export function HomeStatsClient({
     // even when the realtime subscription misses events.
     const pollInterval = setInterval(() => {
       if (cancelled) return;
-      void getMyStatsAction().then((newStats) => {
-        if (!cancelled && newStats) setStats(newStats);
-      });
+      void getMyStatsAction().then(updateStats);
     }, 30_000);
 
     if (typeof window !== "undefined") {

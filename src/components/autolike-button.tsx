@@ -192,7 +192,7 @@ export function AutoLikeButton() {
 
         {/* Small Progress Badge — visible when running AND when paused so
             the user can see how many likes were given this session. */}
-        {(running || status?.paused) && displayLikedCount > 0 && (
+        {(running || status?.paused) && (
           <motion.div
             initial={{ scale: 0 }}
             animate={{ scale: 1 }}

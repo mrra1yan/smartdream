@@ -58,18 +58,24 @@ export function ProfileStatsClient({
           }
         )
         .subscribe((status) => {
-          // Same resync-on-(re)subscribe as home-stats-client.tsx -- Postgres
-          // Realtime doesn't replay events missed while disconnected.
           if (status === "SUBSCRIBED") {
-            void getMyStatsAction().then(setStats);
+            void getMyStatsAction().then(updateStats);
           }
         });
     })();
 
+    const updateStats = (newStats: UserStats | null) => {
+      if (!cancelled && newStats) {
+        setStats((prev) => ({
+          ...newStats,
+          givenToday: Math.max(prev.givenToday, newStats.givenToday),
+          receivedToday: Math.max(prev.receivedToday, newStats.receivedToday),
+        }));
+      }
+    };
+
     const handleFocus = () => {
-      void getMyStatsAction().then((newStats) => {
-        if (!cancelled && newStats) setStats(newStats);
-      });
+      void getMyStatsAction().then(updateStats);
     };
 
     let statsUpdateTimeout: NodeJS.Timeout | null = null;
@@ -85,15 +91,7 @@ export function ProfileStatsClient({
       // never overwrites a higher optimistic count.
       if (statsUpdateTimeout) clearTimeout(statsUpdateTimeout);
       statsUpdateTimeout = setTimeout(() => {
-        void getMyStatsAction().then((newStats) => {
-          if (!cancelled && newStats) {
-            setStats((prev) => ({
-              ...newStats,
-              givenToday: Math.max(prev.givenToday, newStats.givenToday),
-              receivedToday: Math.max(prev.receivedToday, newStats.receivedToday),
-            }));
-          }
-        });
+        void getMyStatsAction().then(updateStats);
       }, 2000);
     };
 
@@ -103,9 +101,7 @@ export function ProfileStatsClient({
     const handleStatsSync = () => {
       if (statsSyncTimeout) clearTimeout(statsSyncTimeout);
       statsSyncTimeout = setTimeout(() => {
-        void getMyStatsAction().then((newStats) => {
-          if (!cancelled && newStats) setStats(newStats);
-        });
+        void getMyStatsAction().then(updateStats);
       }, 1500);
     };
 
@@ -114,9 +110,7 @@ export function ProfileStatsClient({
     // contexts (backgrounding, screen lock, network switches).
     const pollInterval = setInterval(() => {
       if (cancelled) return;
-      void getMyStatsAction().then((newStats) => {
-        if (!cancelled && newStats) setStats(newStats);
-      });
+      void getMyStatsAction().then(updateStats);
     }, 30_000);
 
     if (typeof window !== "undefined") {

@@ -78,6 +78,13 @@ export function useAutoLike() {
         // so subsequent requests re-check the top of the feed instead of
         // querying out-of-bounds offsets indefinitely.
         offsetRef.current = 0;
+        const { active: currentActive, queue: currentQueue } = useAdStore.getState();
+        const pendingIds = new Set([
+          ...Array.from(enqueuedRef.current),
+          ...currentActive.map((a) => a.linkId),
+          ...currentQueue.map((q) => q.linkId),
+        ]);
+        seenRef.current = pendingIds;
       }
 
       const newLinks = links.filter((l) => !seenRef.current.has(l.id));
@@ -93,11 +100,20 @@ export function useAutoLike() {
           offsetRef.current = 0;
         }
       }
-      // Only declare real exhaustion after several consecutive short pages
-      // that also produced zero new links from offset 0 -- a single short/all-duplicate
-      // page at high offset is an expected side effect of list length / offset bounds.
+      // Only declare real exhaustion if even after resetting non-pending seenRef items there are still zero new links
       if (links.length < 50 && offset === 0 && noNewLinksStreakRef.current >= 3) {
-        exhaustedRef.current = true;
+        const { active: currentActive, queue: currentQueue } = useAdStore.getState();
+        const pendingIds = new Set([
+          ...Array.from(enqueuedRef.current),
+          ...currentActive.map((a) => a.linkId),
+          ...currentQueue.map((q) => q.linkId),
+        ]);
+        if (seenRef.current.size > pendingIds.size) {
+          seenRef.current = pendingIds;
+          noNewLinksStreakRef.current = 0;
+        } else {
+          exhaustedRef.current = true;
+        }
       }
 
       fetchFailStreakRef.current = 0;
