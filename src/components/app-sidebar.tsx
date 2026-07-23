@@ -35,7 +35,7 @@ import type { Role } from "@/lib/types";
 const USER_NAV = [
   { href: "/", icon: Home, key: "nav.home" },
   { href: "/blog", icon: Newspaper, key: "nav.blog" },
-  { href: "/boosted", icon: Rocket, key: "nav.boosted" },
+
   { href: "/links", icon: LinkIcon, key: "nav.links" },
   { href: "/premium", icon: Sparkles, key: "nav.premium" },
   { href: "/profile", icon: User, key: "nav.profile" },
