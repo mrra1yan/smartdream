@@ -260,14 +260,20 @@ export const useAdStore = create<AdStore>((set, get) => {
         const remaining = TOTAL_AD_SECONDS * 1000 - elapsed;
 
         if (remaining <= 0) {
-          void commitAndFinalise(linkId, result.token, ad.source);
+          if (!finalisingIds.has(linkId)) {
+            finalisingIds.add(linkId);
+            void commitAndFinalise(linkId, result.token, ad.source);
+          }
         } else {
           clearTimer(linkId);
           timers.set(
             linkId,
             setTimeout(() => {
               timers.delete(linkId);
-              void commitAndFinalise(linkId, result.token, ad.source);
+              if (!finalisingIds.has(linkId)) {
+                finalisingIds.add(linkId);
+                void commitAndFinalise(linkId, result.token, ad.source);
+              }
             }, remaining),
           );
         }

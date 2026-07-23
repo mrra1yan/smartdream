@@ -68,13 +68,14 @@ export async function getFeed(
   // different window than the commit-time check that actually decides
   // whether a like is accepted -- showing owners the commit would reject
   // (wasted ad-view cycles) or hiding owners the commit would have allowed
-  // (needlessly shrinking the feed). 
   // We pass hoursAgoISO for window_iso to prevent the entire feed from
   // disappearing at exactly midnight when active_likes resets to 0.
-  // minus24h_iso uses windowIso (Midnight) to align with commit rules.
+  // minus24h_iso now also uses the rolling window to align exactly with
+  // the exposure/deficit check in process_like_commit and commitLikeAction.
+  const rollingWindowIso = hoursAgoISO(settings.activeWindowHours);
   const { data: userStats, error } = await supabase.rpc("get_feed_user_stats", {
-    window_iso: hoursAgoISO(settings.activeWindowHours),
-    minus24h_iso: windowIso,
+    window_iso: rollingWindowIso,
+    minus24h_iso: rollingWindowIso,
   });
 
   if (error || !userStats || userStats.length === 0) {
