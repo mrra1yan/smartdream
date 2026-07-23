@@ -163,7 +163,8 @@ class FloatingWidgetService : Service() {
             setPadding(0, dpToPx(1), 0, dpToPx(1))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
+                0,
+                1f
             )
         }
 
@@ -208,7 +209,8 @@ class FloatingWidgetService : Service() {
             orientation = LinearLayout.VERTICAL
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                dpToPx(160) // 160dp height per ad container
+                0,
+                1f // Distribute height evenly among active slots inside fixed 160dp container area
             ).apply {
                 setMargins(0, dpToPx(1), 0, dpToPx(1))
             }
@@ -274,8 +276,8 @@ class FloatingWidgetService : Service() {
         if (isCollapsed) {
             params.height = dpToPx(16)
         } else {
-            val count = activeSlotCount.coerceAtLeast(1)
-            params.height = dpToPx(16 + 2 + (count * 160))
+            // Fixed total height: 16dp header + 2dp padding + 160dp ad container area = 178dp
+            params.height = dpToPx(178)
         }
         if (floatingView != null) {
             try {
