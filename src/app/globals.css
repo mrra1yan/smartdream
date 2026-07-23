@@ -1,0 +1,196 @@
+@import "tailwindcss";
+
+/* Enable class-based dark mode (next-themes adds `.dark` on <html>). */
+@custom-variant dark (&:where(.dark, .dark *));
+
+:root {
+  --background: #f8fafc;
+  --surface: #ffffff;
+  --foreground: #0f172a;
+  --muted: #64748b;
+  --border: #94a3b8;
+  --primary: #0f172a;
+  --primary-foreground: #f8fafc;
+  --accent: #6366f1;
+  --accent-foreground: #ffffff;
+  --danger: #ef4444;
+  --shadow-sm: 0 1px 2px 0 rgba(15, 23, 42, 0.02);
+  --shadow-md: 0 4px 6px -1px rgba(15, 23, 42, 0.04), 0 2px 4px -2px rgba(15, 23, 42, 0.02);
+  --shadow-lg: 0 10px 15px -3px rgba(15, 23, 42, 0.03), 0 4px 6px -4px rgba(15, 23, 42, 0.01);
+  --shadow-xl: 0 20px 25px -5px rgba(15, 23, 42, 0.04), 0 8px 10px -6px rgba(15, 23, 42, 0.02);
+  --shadow-2xl: 0 25px 50px -12px rgba(15, 23, 42, 0.06);
+}
+
+.dark {
+  --background: #000000;
+  --surface: #0a0a0a;
+  --foreground: #f8fafc;
+  --muted: #94a3b8;
+  --border: #334155;
+  --primary: #f8fafc;
+  --primary-foreground: #000000;
+  --accent: #818cf8;
+  --accent-foreground: #000000;
+  --danger: #f87171;
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.25);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.3), 0 2px 4px -2px rgba(0, 0, 0, 0.2);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.35), 0 4px 6px -4px rgba(0, 0, 0, 0.2);
+  --shadow-xl: 0 20px 25px -5px rgba(0, 0, 0, 0.45), 0 8px 10px -6px rgba(0, 0, 0, 0.3);
+  --shadow-2xl: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-danger: var(--danger);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --shadow-sm: var(--shadow-sm);
+  --shadow-md: var(--shadow-md);
+  --shadow-lg: var(--shadow-lg);
+  --shadow-xl: var(--shadow-xl);
+  --shadow-2xl: var(--shadow-2xl);
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
+  -webkit-tap-highlight-color: transparent;
+  overscroll-behavior-y: none;
+}
+
+/* App-like: no text selection on taps, smooth scrolling, safe-area padding. */
+* {
+  -webkit-user-drag: none;
+}
+
+input,
+textarea,
+select,
+button {
+  font: inherit;
+}
+
+/* Hide scrollbars for the app-like bottom nav feel but keep scrolling. */
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+h1 {
+  line-height: 1.5em !important;
+}
+
+/* Ensure interactive elements always show pointer cursor on hover */
+a,
+button,
+select,
+input[type="submit"],
+input[type="button"],
+input[type="checkbox"],
+input[type="radio"],
+label,
+[role="button"] {
+  cursor: pointer;
+}
+
+/* Custom Toast Close Button: large, height-aligned, right-side panel */
+[data-sonner-toast] {
+  padding-right: 3.25rem !important;
+  position: relative !important;
+  overflow: hidden !important;
+}
+
+[data-sonner-toast] [data-close-button] {
+  position: absolute !important;
+  top: 0 !important;
+  right: 0 !important;
+  left: auto !important;
+  bottom: 0 !important;
+  height: 100% !important;
+  width: 3rem !important;
+  border-radius: 0 !important;
+  border: none !important;
+  border-left: 1px solid rgba(0, 0, 0, 0.06) !important;
+  background: transparent !important;
+  color: var(--muted) !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  transform: none !important;
+  opacity: 0.6 !important;
+  cursor: pointer !important;
+  transition: all 0.15s ease-in-out !important;
+}
+
+.dark [data-sonner-toast] [data-close-button] {
+  border-left: 1px solid rgba(255, 255, 255, 0.06) !important;
+  color: var(--muted) !important;
+}
+
+[data-sonner-toast] [data-close-button]:hover {
+  background: #ef4444 !important;
+  border-left-color: #ef4444 !important;
+  opacity: 1 !important;
+}
+
+[data-sonner-toast] [data-close-button]:hover svg,
+[data-sonner-toast] [data-close-button]:hover svg * {
+  stroke: #ffffff !important;
+  color: #ffffff !important;
+}
+
+
+[data-sonner-toast] [data-close-button] svg {
+  height: 1rem !important;
+  width: 1rem !important;
+  stroke: currentColor !important;
+  stroke-width: 2.5px !important;
+  fill: none !important;
+}
+
+/* Hide number input spinner arrows globally */
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+
+input[type="number"] {
+  -moz-appearance: textfield;
+  appearance: textfield;
+}
+
+/* Blur sidebar when any modal popup is open in DOM */
+body:has(div.fixed.z-50) aside,
+body:has(div.fixed.z-\[9999\]) aside,
+body:has(dialog[open]) aside {
+  filter: blur(5px);
+  pointer-events: none;
+  transition: filter 0.25s ease;
+}
+
+/* Ensure smooth transition when popup closes */
+aside {
+  transition: filter 0.25s ease;
+}
+
+
+
+

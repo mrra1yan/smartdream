@@ -1,0 +1,70 @@
+name: Build and Auto-Deploy APK
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    # Adding a condition to prevent infinite loops from our own bot commit
+    if: "!contains(github.event.head_commit.message, '[skip ci]')"
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: MobileApp/package-lock.json
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+
+      - name: Install dependencies
+        working-directory: MobileApp
+        run: npm ci || npm install
+
+      - name: Build Release APK
+        working-directory: MobileApp/android
+        run: ./gradlew assembleRelease
+
+      - name: Upload APK to Release Repo
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+        run: |
+          apk_path="MobileApp/android/app/build/outputs/apk/release/Smart-Dream-universal.apk"
+          if [ ! -f "$apk_path" ]; then
+            apk_path="MobileApp/android/app/build/outputs/apk/release/app-release.apk"
+          fi
+          mv "$apk_path" SmartDream.apk
+          
+          git clone https://x-access-token:${GH_TOKEN}@github.com/nurulhudda247/SmartDream-Releases.git releases-repo
+          cd releases-repo
+          if [ -z "$(git log -1 2>/dev/null)" ]; then
+            echo "# SmartDream Releases" > README.md
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add README.md
+            git commit -m "Initial commit"
+            git push origin HEAD
+          fi
+          git tag -f latest
+          git push -f origin latest
+          cd ..
+          
+          gh release delete latest -R nurulhudda247/SmartDream-Releases -y || true
+          gh release create latest \
+            --repo nurulhudda247/SmartDream-Releases \
+            --title "Latest APK Build" \
+            --notes "Auto-generated APK from the latest push." \
+            SmartDream.apk
