@@ -163,8 +163,7 @@ class FloatingWidgetService : Service() {
             setPadding(0, dpToPx(1), 0, dpToPx(1))
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
+                LinearLayout.LayoutParams.MATCH_PARENT
             )
         }
 
@@ -241,8 +240,7 @@ class FloatingWidgetService : Service() {
         val wv = WebView(this).apply {
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
-                0,
-                1f
+                LinearLayout.LayoutParams.MATCH_PARENT
             )
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
