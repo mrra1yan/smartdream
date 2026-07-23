@@ -20,9 +20,9 @@ export const LOCALES: Locale[] = ["en", "bn"];
 export const DEFAULT_LOCALE: Locale = "en";
 
 export const MAX_LINKS_PER_USER = 20;
-export const AD_LOADING_SECONDS = 3;
-export const AD_VIEW_SECONDS = 4;
-export const TOTAL_AD_SECONDS = AD_LOADING_SECONDS + AD_VIEW_SECONDS; // 7s total
+export const AD_LOADING_SECONDS = 4;
+export const AD_VIEW_SECONDS = 5;
+export const TOTAL_AD_SECONDS = AD_LOADING_SECONDS + AD_VIEW_SECONDS; // 9s total
 export const MAX_CONCURRENT_ADS = 3;
 /** Hours before a liked link can reappear in the viewer's feed. */
 // TEMP: cooldown off — value kept for when we re-enable

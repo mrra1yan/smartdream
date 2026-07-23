@@ -74,7 +74,7 @@ export async function commitLikeAction(
   }
 
   const elapsedMs = Date.now() - claims.startedAtMs;
-  const MIN_ELAPSED_MS = 7000; // 7 seconds min required to prevent false rejections from timer drift
+  const MIN_ELAPSED_MS = 9000; // 9 seconds min required to prevent false rejections from timer drift
   if (elapsedMs < MIN_ELAPSED_MS) {
     console.warn(`[commitLikeAction] Ad view duration too short: ${elapsedMs}ms (min required: ${MIN_ELAPSED_MS}ms)`);
     return { ok: false, error: "ad not fully viewed" };

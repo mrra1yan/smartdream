@@ -76,7 +76,11 @@ export function HomeStatsClient({
 
     const setAuthoritativeStats = (newStats: UserStats | null) => {
       if (!cancelled && newStats) {
-        setStats(newStats);
+        setStats((prev) => ({
+          ...newStats,
+          givenToday: Math.max(prev.givenToday, newStats.givenToday),
+          receivedToday: Math.max(prev.receivedToday, newStats.receivedToday),
+        }));
       }
     };
 

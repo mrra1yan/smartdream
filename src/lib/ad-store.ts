@@ -138,7 +138,7 @@ async function commitAndFinalise(
   }
 
   // Dispatch stats_updated ONLY when the server confirms successful DB insertion
-  if (ok && typeof window !== "undefined" && source !== "boosted") {
+  if (ok && typeof window !== "undefined") {
     window.dispatchEvent(new Event("stats_updated"));
   } else if (!ok && typeof window !== "undefined") {
     window.dispatchEvent(new Event("stats_sync"));

@@ -397,7 +397,7 @@ export function useAutoLike() {
         );
 
         setProgress({
-          liked: likedCountRef.current,
+          liked: totalCommittedLikes,
           failed: failedRef.current,
         });
 
@@ -445,8 +445,12 @@ export function useAutoLike() {
       }
 
       if (dirty) {
+        const totalCommittedLikes = Object.values(currentCommitted).reduce(
+          (sum, count) => sum + count,
+          0
+        );
         setProgress({
-          liked: likedCountRef.current,
+          liked: totalCommittedLikes,
           failed: failedRef.current,
         });
       }
