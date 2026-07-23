@@ -244,10 +244,11 @@ class FloatingWidgetService : Service() {
                 0,
                 1f
             )
+            setLayerType(View.LAYER_TYPE_HARDWARE, null)
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.useWideViewPort = true
-            settings.loadWithOverviewMode = true
+            settings.useWideViewPort = false
+            settings.loadWithOverviewMode = false
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             settings.userAgentString =
                 "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 SmartDreamApp/1.0"
@@ -267,14 +268,10 @@ class FloatingWidgetService : Service() {
             }
         }
 
-        if (!url.isNullOrEmpty()) {
-            wv.loadUrl(url)
-        }
-
         cardContainer.addView(cardHeader)
         cardContainer.addView(wv)
 
-        return SlotView(cardContainer, wv, slotTitle, linkId, url)
+        return SlotView(cardContainer, wv, slotTitle, "", "")
     }
 
     private fun updateWindowDimensions() {
@@ -338,6 +335,11 @@ class FloatingWidgetService : Service() {
                     slot.titleView.text = "Ad #${i + 1}"
                     slotViews.add(slot)
                     webViewContainer?.addView(slot.container)
+                    slot.currentUrl = url
+                    slot.currentLinkId = linkId
+                    if (!url.isNullOrEmpty()) {
+                        slot.webView.loadUrl(url)
+                    }
                 }
             }
 
