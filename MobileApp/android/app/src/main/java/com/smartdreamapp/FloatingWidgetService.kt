@@ -15,6 +15,8 @@ import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
+import android.webkit.CookieManager
+import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -245,13 +247,58 @@ class FloatingWidgetService : Service() {
                 1f
             )
             setLayerType(View.LAYER_TYPE_HARDWARE, null)
+
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.useWideViewPort = false
-            settings.loadWithOverviewMode = false
+            // Enable proper viewport handling so responsive ad creatives
+            // scale correctly inside the small 110dp floating container.
+            settings.useWideViewPort = true
+            settings.loadWithOverviewMode = true
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            settings.allowFileAccess = true
+            settings.allowContentAccess = true
+            // Prevent crashes from ad popups — handle them inline instead.
+            settings.setSupportMultipleWindows(false)
+            settings.javaScriptCanOpenWindowsAutomatically = true
+            // Video ads must auto-play without user gesture.
+            settings.mediaPlaybackRequiresUserAction = false
+            // Use a clean Chrome user-agent — ad networks detect and block
+            // custom WebView identifiers like "SmartDreamApp".
             settings.userAgentString =
-                "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36 SmartDreamApp/1.0"
+                "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+            // Scale content to fit the 110dp-wide container (roughly 30%
+            // of a typical 360dp-wide phone screen).
+            setInitialScale(30)
+
+            // Enable third-party cookies — most ad networks require them
+            // for ad serving and impression tracking.
+            CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
+
+            // WebChromeClient is required for JS alerts, window.open(),
+            // progress callbacks, and many ad rendering flows that fail
+            // silently without it.
+            webChromeClient = object : WebChromeClient() {
+                override fun onCreateWindow(
+                    view: WebView?,
+                    isDialog: Boolean,
+                    isUserGesture: Boolean,
+                    resultMsg: android.os.Message?
+                ): Boolean {
+                    // Load popup URLs in the same WebView instead of
+                    // spawning a new window (which is impossible in a
+                    // floating overlay).
+                    if (view != null && resultMsg != null) {
+                        val transport = resultMsg.obj as? WebView.WebViewTransport
+                        transport?.webView = view
+                        resultMsg.sendToTarget()
+                        return true
+                    }
+                    return false
+                }
+            }
+
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(
                     view: WebView?,
