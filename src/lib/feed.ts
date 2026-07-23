@@ -118,13 +118,10 @@ export async function getFeed(
     const g24 = Number(p.given_24h) || 0;
     const r24 = Number(p.recv_24h) || 0;
 
-    // 100% shutoff: if they have received more likes than they gave
-    // Note: We intentionally do NOT check `g24 <= 0` anymore.
-    // At exactly midnight, g24 and r24 reset to 0. If we required g24 > 0,
-    // NO ONE would appear in the feed at midnight (deadlock).
-    // With g24=0 and r24=0, (0 > 0) is false, allowing them to appear 
-    // in the feed to receive exactly 1 "free" like before being shut off!
-    if (r24 > g24) { _dbg_deficit++; continue; }
+    // 100% shutoff: if they have received as many or more likes than they gave (r24 >= g24 when g24 > 0)
+    // Note: At exactly midnight, g24 and r24 reset to 0. With g24=0 and r24=0,
+    // they are allowed to appear in the feed to receive 1 "free" like before being shut off.
+    if (g24 > 0 && r24 >= g24) { _dbg_deficit++; continue; }
 
     _dbg_eligible++;
 

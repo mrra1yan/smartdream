@@ -59,7 +59,7 @@ export function HomeStatsClient({
         )
         .subscribe((status) => {
           if (status === "SUBSCRIBED") {
-            void getMyStatsAction().then(updateStats);
+            void getMyStatsAction().then(setAuthoritativeStats);
           }
         });
     })();
@@ -74,8 +74,14 @@ export function HomeStatsClient({
       }
     };
 
+    const setAuthoritativeStats = (newStats: UserStats | null) => {
+      if (!cancelled && newStats) {
+        setStats(newStats);
+      }
+    };
+
     const handleFocus = () => {
-      void getMyStatsAction().then(updateStats);
+      void getMyStatsAction().then(setAuthoritativeStats);
     };
 
     let statsUpdateTimeout: NodeJS.Timeout | null = null;
@@ -88,7 +94,7 @@ export function HomeStatsClient({
       }));
 
       // Background server sync with Math.max so a stale response
-      // never overwrites a higher optimistic count.
+      // never overwrites a higher optimistic count while commit is in flight.
       if (statsUpdateTimeout) clearTimeout(statsUpdateTimeout);
       statsUpdateTimeout = setTimeout(() => {
         void getMyStatsAction().then(updateStats);
@@ -96,22 +102,19 @@ export function HomeStatsClient({
     };
 
     // stats_sync is dispatched when a commitLike attempt fails — fetch
-    // authoritative counts without an optimistic increment (the like may have
-    // landed server-side despite the client-side error).
+    // authoritative counts without an optimistic increment to clear failed optimistic +1.
     const handleStatsSync = () => {
       if (statsSyncTimeout) clearTimeout(statsSyncTimeout);
       statsSyncTimeout = setTimeout(() => {
-        void getMyStatsAction().then(updateStats);
+        void getMyStatsAction().then(setAuthoritativeStats);
       }, 1500);
     };
 
     // Periodic safety-net poll: Supabase Realtime WebSocket connections can
-    // silently drop in native WebView contexts (backgrounding, screen lock,
-    // network switches). This ensures the stats card stays roughly current
-    // even when the realtime subscription misses events.
+    // silently drop in native WebView contexts. This ensures stats stay authoritative.
     const pollInterval = setInterval(() => {
       if (cancelled) return;
-      void getMyStatsAction().then(updateStats);
+      void getMyStatsAction().then(setAuthoritativeStats);
     }, 30_000);
 
     if (typeof window !== "undefined") {
