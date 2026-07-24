@@ -149,6 +149,7 @@ function App(): React.JSX.Element {
   const adsRef = useRef<AdInfo[]>([]);
   adsRef.current = ads;
   const appStateRef = useRef<string>(AppState.currentState);
+  const autoLikeActiveRef = useRef<boolean>(false);
 
   useEffect(() => {
     fetchConfig();
@@ -170,7 +171,7 @@ function App(): React.JSX.Element {
       appStateRef.current = nextAppState;
       if (Platform.OS === 'android' && FloatingWidgetModule) {
         if (nextAppState === 'background' || nextAppState === 'inactive') {
-          if (adsRef.current.length > 0) {
+          if (adsRef.current.length > 0 && autoLikeActiveRef.current) {
             FloatingWidgetModule.startService(JSON.stringify(adsRef.current));
           }
         } else if (nextAppState === 'active') {
@@ -194,11 +195,12 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     if (Platform.OS === 'android' && FloatingWidgetModule) {
-      // Only start/update the floating overlay when confirmed backgrounded.
+      // Only start/update the floating overlay when confirmed backgrounded
+      // AND the user has an active Auto-Like subscription.
       // stopService is always safe to call (no-op if not running).
-      if (ads.length > 0 && (appStateRef.current === 'background' || appStateRef.current === 'inactive')) {
+      if (ads.length > 0 && autoLikeActiveRef.current && (appStateRef.current === 'background' || appStateRef.current === 'inactive')) {
         FloatingWidgetModule.updateAds(JSON.stringify(ads));
-      } else if (ads.length === 0) {
+      } else {
         FloatingWidgetModule.stopService();
       }
       // When ads.length > 0 but app is in foreground ('active'):
@@ -314,6 +316,13 @@ function App(): React.JSX.Element {
           }
           return nextAds;
         });
+      } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
+        autoLikeActiveRef.current = data.active === true;
+        
+        // Immediately stop service if status became inactive while running
+        if (!autoLikeActiveRef.current && Platform.OS === 'android' && FloatingWidgetModule) {
+          FloatingWidgetModule.stopService();
+        }
       } else if (data.type === 'CLOSE_AD') {
         setAds((prev) => prev.filter((a) => a.linkId !== data.linkId));
       } else if (data.type === 'CLEAR_CACHE') {

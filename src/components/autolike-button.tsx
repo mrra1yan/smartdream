@@ -36,6 +36,18 @@ export function AutoLikeButton() {
     void refreshStatus();
   }, [refreshStatus]);
 
+  // Sync Auto-Like active status to React Native app to restrict PiP background widget
+  useEffect(() => {
+    if (typeof window !== "undefined" && (window as any).ReactNativeWebView) {
+      (window as any).ReactNativeWebView.postMessage(
+        JSON.stringify({
+          type: "SYNC_AUTO_LIKE_STATUS",
+          active: !!status?.active,
+        })
+      );
+    }
+  }, [status?.active]);
+
   const toBengaliNumber = (num: number | string): string => {
     const str = String(num);
     if (locale !== "bn") return str;
