@@ -22,9 +22,9 @@ const { FloatingWidgetModule } = NativeModules;
 
 const WebViewComponent = WebView as any;
 
-const CONFIG_URL = 'https://axzletfmciwquywhfxsq.supabase.co/storage/v1/object/public/app-config/config.json';
+const CONFIG_URL = 'https://ihhpybntlaqvbhdmksjl.supabase.co/storage/v1/object/public/app-config/config.json';
 const APP_VERSION = '1.0.0';
-const DEFAULT_WEB_URL = 'https://smart-dream.vercel.app';
+const DEFAULT_WEB_URL = 'https://smart-dream-admin.vercel.app';
 // Matches src/app/api/app-version/route.ts's own default downloadUrl -- the
 // known-good fallback if remote config ever hands us an untrusted one.
 const DEFAULT_DOWNLOAD_URL = 'https://github.com/nurulhudda247/SmartDream-Releases/releases/latest/download/SmartDream.apk';
@@ -318,7 +318,7 @@ function App(): React.JSX.Element {
         });
       } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
         autoLikeActiveRef.current = data.active === true;
-        
+
         // Immediately stop service if status became inactive while running
         if (!autoLikeActiveRef.current && Platform.OS === 'android' && FloatingWidgetModule) {
           FloatingWidgetModule.stopService();
@@ -350,7 +350,7 @@ function App(): React.JSX.Element {
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
       <View style={[styles.innerContainer, { paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0 }]}>
-        
+
         <WebViewComponent
           ref={mainWebViewRef}
           source={{ uri: webUrl }}
@@ -449,7 +449,7 @@ function App(): React.JSX.Element {
             <Text style={styles.errorSubtitle}>
               আপনার ইন্টারনেট সংযোগ বিচ্ছিন্ন হয়ে গেছে। অনুগ্রহ করে কানেকশন চেক করে আবার চেষ্টা করুন।
             </Text>
-            
+
             <View style={styles.errorButtonGroup}>
               <TouchableOpacity
                 style={[styles.errorButton, styles.retryButton]}
@@ -457,7 +457,7 @@ function App(): React.JSX.Element {
               >
                 <Text style={styles.retryButtonText}>Retry (আবার চেষ্টা করুন)</Text>
               </TouchableOpacity>
-              
+
               <TouchableOpacity
                 style={[styles.errorButton, styles.quitButton]}
                 onPress={handleQuit}

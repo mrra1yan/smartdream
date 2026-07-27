@@ -11,6 +11,10 @@ import { MAX_CONCURRENT_ADS } from "@/lib/types";
 // rendered list (see bufferRef below), and how often the full list gets
 // re-validated against a fresh scan.
 const FLUSH_INTERVAL_MS = 800;
+// likes_count itself is kept live by the realtime channel below -- this
+// interval only needs to be frequent enough to prune stale/liked-out links
+// and surface newly-eligible ones, not to keep counts fresh.
+const REVALIDATE_INTERVAL_MS = 60_000;
 
 export function Feed({
   endpoint,
@@ -127,10 +131,21 @@ export function Feed({
       void revalidate();
     }
 
+    // Skip the periodic full-list rescan while the tab/app is backgrounded --
+    // likes_count itself stays live via the realtime channel below, so this
+    // interval only needs to run when someone could actually see the result.
     const interval = setInterval(() => {
+      if (document.hidden) return;
       void revalidate();
-    }, 15_000);
-    return () => clearInterval(interval);
+    }, REVALIDATE_INTERVAL_MS);
+    const onVisible = () => {
+      if (!document.hidden) void revalidate();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(interval);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [endpoint, visibleLinks.length]);
 
   useEffect(() => {
