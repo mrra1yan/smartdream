@@ -1,6 +1,9 @@
 import type { NextConfig } from "next";
+import path from "path";
 
 const nextConfig: NextConfig = {
+  // Parent folder has another package-lock.json; pin tracing to this app root.
+  outputFileTracingRoot: path.join(__dirname),
   images: {
     remotePatterns: [
       {

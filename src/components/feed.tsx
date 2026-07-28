@@ -8,13 +8,29 @@ import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { MAX_CONCURRENT_ADS } from "@/lib/types";
 
 // How often buffered-but-unrendered links get flushed into the actually
-// rendered list (see bufferRef below), and how often the full list gets
+// rendered list (see bufferRef below), and how often the list gets
 // re-validated against a fresh scan.
 const FLUSH_INTERVAL_MS = 800;
 // likes_count itself is kept live by the realtime channel below -- this
 // interval only needs to be frequent enough to prune stale/liked-out links
 // and surface newly-eligible ones, not to keep counts fresh.
 const REVALIDATE_INTERVAL_MS = 60_000;
+// Cap background prefetch / revalidate pages. Unbounded pagination was
+// hammering /api/feed (offset 0→400+) and saturating the Supabase path.
+const MAX_PREFETCH_PAGES = 2; // SSR page + 2 more ≈ 150 links
+const MAX_REVALIDATE_PAGES = 3;
+
+/** Keep first occurrence of each link.id — prevents React duplicate-key errors. */
+function dedupeById(list: FeedLink[]): FeedLink[] {
+  const seen = new Set<string>();
+  const out: FeedLink[] = [];
+  for (const link of list) {
+    if (seen.has(link.id)) continue;
+    seen.add(link.id);
+    out.push(link);
+  }
+  return out;
+}
 
 export function Feed({
   endpoint,
@@ -28,7 +44,7 @@ export function Feed({
   maxSlots?: number;
 }) {
   const { t } = useI18n();
-  const [links, setLinks] = useState<FeedLink[]>(initialLinks);
+  const [links, setLinks] = useState<FeedLink[]>(() => dedupeById(initialLinks));
   const [loading, setLoading] = useState(initialLinks.length >= 50);
   // Fetched-but-not-yet-rendered links. A plain ref, not state -- pushing to
   // it doesn't trigger a re-render, so the background fetch loop below can
@@ -36,6 +52,8 @@ export function Feed({
   // decoupled from how expensive rendering the (potentially very large)
   // link list is. The flush effect moves it into `links` in batches.
   const bufferRef = useRef<FeedLink[]>([]);
+  // Ids already in state or buffer — skip duplicates on prefetch/revalidate race.
+  const knownIdsRef = useRef<Set<string>>(new Set(initialLinks.map((l) => l.id)));
 
   // Hide links that have already been liked (committed)
   const committed = useAdStore((s) => s.committed);
@@ -47,7 +65,11 @@ export function Feed({
         const res = await fetch(`${endpoint}?offset=${nextOffset}&limit=50`);
         const data = await res.json();
         const incoming: FeedLink[] = data.links ?? [];
-        bufferRef.current.push(...incoming);
+        for (const link of incoming) {
+          if (knownIdsRef.current.has(link.id)) continue;
+          knownIdsRef.current.add(link.id);
+          bufferRef.current.push(link);
+        }
         return incoming.length;
       } catch {
         return 0;
@@ -56,23 +78,21 @@ export function Feed({
     [endpoint],
   );
 
-  // No scroll-to-load-more here -- the initial 50 render immediately, and
-  // every remaining link keeps loading 50 at a time straight through in the
-  // background, entirely independent of scroll position, until there's
-  // genuinely nothing left. This is purely about what's rendered in this
-  // list for a manually-browsing user; auto-like (use-autolike.ts) makes
-  // its own independent /api/feed calls and never reads this component's
-  // state either way.
+  // Prefetch a bounded number of extra pages in the background. Auto-like
+  // (use-autolike.ts) makes its own /api/feed calls and never reads this
+  // component's state.
   useEffect(() => {
     if (initialLinks.length < 50) return; // SSR's first page already came up short -- nothing more to fetch
     let cancelled = false;
 
     (async () => {
       let currentOffset = initialOffset;
-      while (!cancelled) {
+      let pages = 0;
+      while (!cancelled && pages < MAX_PREFETCH_PAGES) {
         const fetched = await fetchPage(currentOffset);
         if (cancelled || fetched === 0) break;
         currentOffset += fetched;
+        pages += 1;
         if (fetched < 50) break;
       }
       if (!cancelled) setLoading(false);
@@ -91,38 +111,44 @@ export function Feed({
     const interval = setInterval(() => {
       if (bufferRef.current.length === 0) return;
       const chunk = bufferRef.current.splice(0, bufferRef.current.length);
-      setLinks((prev) => [...prev, ...chunk]);
+      setLinks((prev) => dedupeById([...prev, ...chunk]));
     }, FLUSH_INTERVAL_MS);
     return () => clearInterval(interval);
   }, []);
 
-  // Periodically re-scans the full current eligible list, prunes
-  // anything no longer present, and merges any newly available links.
+  // Periodically re-scans a bounded window of eligible links and merges.
   useEffect(() => {
     const revalidate = async () => {
-      const validIds = new Set<string>();
       let scanOffset = 0;
+      let pages = 0;
       const freshLinks: FeedLink[] = [];
-      while (true) {
+      while (pages < MAX_REVALIDATE_PAGES) {
         try {
           const res = await fetch(`${endpoint}?offset=${scanOffset}&limit=50`);
           const data = await res.json();
           const page: FeedLink[] = data.links ?? [];
-          for (const l of page) {
-            validIds.add(l.id);
-            freshLinks.push(l);
-          }
+          freshLinks.push(...page);
+          pages += 1;
           if (page.length < 50) break;
           scanOffset += page.length;
         } catch {
           return; // leave the list as-is on a failed scan
         }
       }
+      const fresh = dedupeById(freshLinks);
+      const freshIds = new Set(fresh.map((l) => l.id));
+      // Drop buffered rows the revalidate scan already covers (avoids flush dupes)
+      bufferRef.current = bufferRef.current.filter((l) => !freshIds.has(l.id));
       setLinks((prev) => {
-        const validPrev = prev.filter((l) => validIds.has(l.id));
-        const prevIds = new Set(validPrev.map((l) => l.id));
-        const newlyAdded = freshLinks.filter((l) => !prevIds.has(l.id));
-        return [...validPrev, ...newlyAdded];
+        const merged = dedupeById([
+          ...fresh,
+          ...prev.filter((l) => !freshIds.has(l.id)),
+        ]);
+        knownIdsRef.current = new Set([
+          ...merged.map((l) => l.id),
+          ...bufferRef.current.map((l) => l.id),
+        ]);
+        return merged;
       });
       setLoading(false);
     };
