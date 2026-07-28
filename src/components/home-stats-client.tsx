@@ -116,11 +116,14 @@ export function HomeStatsClient({
     };
 
     // Periodic safety-net poll: Supabase Realtime WebSocket connections can
-    // silently drop in native WebView contexts. This ensures stats stay authoritative.
+    // silently drop in native WebView contexts. This ensures stats stay
+    // authoritative. 60s (not shorter) because the realtime subscription
+    // above already delivers live updates in the normal case -- this is
+    // just a fallback for when it silently drops.
     const pollInterval = setInterval(() => {
       if (cancelled) return;
       void getMyStatsAction().then(setAuthoritativeStats);
-    }, 30_000);
+    }, 60_000);
 
     if (typeof window !== "undefined") {
       window.addEventListener("focus", handleFocus);

@@ -114,11 +114,12 @@ export function ProfileStatsClient({
       }, 1500);
     };
 
-    // Periodic safety-net poll: same as home-stats-client.tsx
+    // Periodic safety-net poll: same as home-stats-client.tsx (60s, not
+    // shorter, since the realtime subscription already covers the normal case)
     const pollInterval = setInterval(() => {
       if (cancelled) return;
       void getMyStatsAction().then(setAuthoritativeStats);
-    }, 30_000);
+    }, 60_000);
 
     if (typeof window !== "undefined") {
       window.addEventListener("focus", handleFocus);

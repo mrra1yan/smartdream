@@ -17,33 +17,32 @@ export const getEliteUsers = cache(async (): Promise<EliteUserDetail[]> => {
     .eq("is_elite", true);
 
   if (error || !elites) return [];
+  if (elites.length === 0) return [];
 
   const todayStartIso = bangladeshMidnightISO();
+  const eliteIds = elites.map((u) => u.id);
 
-  const res: EliteUserDetail[] = [];
-  for (const u of elites) {
-    const { data: linksList } = await supabase
-      .from("links")
-      .select("likes_count")
-      .eq("user_id", u.id)
-      .gte("sort_order", 0);
+  // Bulk-fetch instead of looping per elite user (was 1 + 2N queries).
+  const [{ data: linksRows }, { data: likesRows }] = await Promise.all([
+    supabase.from("links").select("user_id, likes_count").in("user_id", eliteIds).gte("sort_order", 0),
+    supabase.from("likes").select("receiver_id").in("receiver_id", eliteIds).gte("created_at", todayStartIso),
+  ]);
 
-    const likesReceivedTotal = linksList?.reduce((sum, l) => sum + l.likes_count, 0) || 0;
-
-    const { count: likesReceivedToday } = await supabase
-      .from("likes")
-      .select("*", { count: "exact", head: true })
-      .eq("receiver_id", u.id)
-      .gte("created_at", todayStartIso);
-
-    res.push({
-      ...profileRowToAdmin(u as Profile),
-      likesReceivedToday: likesReceivedToday ?? 0,
-      likesReceivedTotal,
-    });
+  const totalByUser = new Map<string, number>();
+  for (const l of (linksRows as any[] | null) ?? []) {
+    totalByUser.set(l.user_id, (totalByUser.get(l.user_id) ?? 0) + l.likes_count);
   }
 
-  return res;
+  const todayByUser = new Map<string, number>();
+  for (const l of (likesRows as any[] | null) ?? []) {
+    todayByUser.set(l.receiver_id, (todayByUser.get(l.receiver_id) ?? 0) + 1);
+  }
+
+  return elites.map((u) => ({
+    ...profileRowToAdmin(u as Profile),
+    likesReceivedToday: todayByUser.get(u.id) ?? 0,
+    likesReceivedTotal: totalByUser.get(u.id) ?? 0,
+  }));
 });
 
 export const getAdmins = cache(async (): Promise<AdminProfile[]> => {
@@ -65,20 +64,21 @@ export type SuperCounts = {
 };
 
 export const getSuperCounts = cache(async (): Promise<SuperCounts> => {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("is_elite, role, status");
+  // Four indexed COUNTs run in parallel instead of pulling every profile
+  // row over the wire and counting in JS (see getAdminCounts for the same
+  // pattern in the plain-admin dashboard).
+  const [elite, admins, users, pending] = await Promise.all([
+    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("is_elite", true),
+    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "admin"),
+    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "user").eq("is_elite", false).eq("status", "approved"),
+    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("status", "pending").eq("is_elite", false),
+  ]);
 
-  if (error || !data) {
-    return { elite: 0, admins: 0, users: 0, pending: 0 };
-  }
-
-  const all = data as { is_elite: boolean; role: string; status: string }[];
   return {
-    elite: all.filter((p) => p.is_elite).length,
-    admins: all.filter((p) => p.role === "admin").length,
-    users: all.filter((p) => p.role === "user" && !p.is_elite && p.status === "approved").length,
-    pending: all.filter((p) => p.status === "pending" && !p.is_elite).length,
+    elite: elite.count ?? 0,
+    admins: admins.count ?? 0,
+    users: users.count ?? 0,
+    pending: pending.count ?? 0,
   };
 });
 
@@ -173,11 +173,14 @@ export const getAdminAuditLog = cache(
 
 export const getAllUsersForSuper = cache(
   async (): Promise<AdminProfile[]> => {
+    // Safety cap -- unbounded before, would silently get slower (and
+    // eventually hit response-size limits) as the user base grows.
     const { data, error } = await supabase
       .from("profiles")
       .select("*")
       .in("role", ["user", "admin"])
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(1000);
 
   if (error || !data) return [];
   return (data as Profile[]).map(profileRowToAdmin);
@@ -196,21 +199,26 @@ export const getEliteUsersWithLikes = cache(
       .eq("is_elite", true);
 
     if (error || !elites) return [];
+    if (elites.length === 0) return [];
 
-    const res: EliteUserWithLikes[] = [];
-    for (const u of elites) {
-      const { data: linksList } = await supabase
-        .from("links")
-        .select("likes_count")
-        .eq("user_id", u.id)
-        .gte("sort_order", 0);
+    const eliteIds = elites.map((u) => u.id);
 
-      const likesReceived = linksList?.reduce((sum, l) => sum + l.likes_count, 0) || 0;
-      res.push({
-        ...profileRowToAdmin(u as Profile),
-        likesReceived,
-      });
+    // Bulk-fetch instead of looping per elite user (was 1 + N queries).
+    const { data: linksRows } = await supabase
+      .from("links")
+      .select("user_id, likes_count")
+      .in("user_id", eliteIds)
+      .gte("sort_order", 0);
+
+    const totalByUser = new Map<string, number>();
+    for (const l of (linksRows as any[] | null) ?? []) {
+      totalByUser.set(l.user_id, (totalByUser.get(l.user_id) ?? 0) + l.likes_count);
     }
+
+    const res: EliteUserWithLikes[] = elites.map((u) => ({
+      ...profileRowToAdmin(u as Profile),
+      likesReceived: totalByUser.get(u.id) ?? 0,
+    }));
 
     return res.sort((a, b) => b.likesReceived - a.likesReceived);
   },

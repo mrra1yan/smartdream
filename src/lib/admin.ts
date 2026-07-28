@@ -43,30 +43,34 @@ export type AdminCounts = {
 };
 
 export const getAdminCounts = cache(async (): Promise<AdminCounts> => {
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("role, status, is_elite");
+  // Three indexed COUNTs run in parallel instead of pulling every profile
+  // row over the wire and counting in JS -- this was an unbounded full
+  // table read that scaled linearly with the user base for a handful of
+  // numbers the database can compute directly.
+  const [total, pending, admins] = await Promise.all([
+    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "user").eq("status", "approved").eq("is_elite", false),
+    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("status", "pending").in("role", ["user", "admin"]).eq("is_elite", false),
+    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "admin").eq("is_elite", false),
+  ]);
 
-  if (error || !data) {
-    return { total: 0, pending: 0, admins: 0 };
-  }
-
-  const all = data as { role: string; status: string; is_elite: boolean }[];
-  const total = all.filter((p) => p.role === "user" && p.status === "approved" && !p.is_elite).length;
-  const pending = all.filter((p) => p.status === "pending" && (p.role === "user" || p.role === "admin") && !p.is_elite).length;
-  const admins = all.filter((p) => p.role === "admin" && !p.is_elite).length;
-
-  return { total, pending, admins };
+  return {
+    total: total.count ?? 0,
+    pending: pending.count ?? 0,
+    admins: admins.count ?? 0,
+  };
 });
 
 export const getPendingUsers = cache(async (): Promise<PendingUserProfile[]> => {
+  // Safety cap -- unbounded before, would silently get slower (and
+  // eventually hit response-size limits) as the pending queue grows.
   const { data, error } = await supabase
     .from("profiles")
     .select("*")
     .eq("status", "pending")
     .eq("is_elite", false)
     .in("role", ["user", "admin"])
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(1000);
 
   if (error || !data) {
     console.error("getPendingUsers error:", error);
@@ -103,12 +107,15 @@ export const getPendingUsers = cache(async (): Promise<PendingUserProfile[]> => 
 });
 
 export const getAllUsers = cache(async (): Promise<AdminProfile[]> => {
+  // Safety cap -- unbounded before, would silently get slower (and
+  // eventually hit response-size limits) as the user base grows.
   const { data, error } = await supabase
     .from("profiles")
     .select("*")
     .eq("is_elite", false)
     .in("role", ["user", "admin"])
-    .order("created_at", { ascending: false });
+    .order("created_at", { ascending: false })
+    .limit(1000);
 
   if (error || !data) return [];
   return (data as Profile[]).map(profileRowToAdmin);
@@ -125,7 +132,8 @@ export const searchUsers = cache(
       .eq("is_elite", false)
       .in("role", ["user", "admin"])
       .or(`public_id.ilike.%${term}%,email.ilike.%${term}%,phone.ilike.%${term}%`)
-      .order("created_at", { ascending: false });
+      .order("created_at", { ascending: false })
+      .limit(1000);
 
     if (error || !data) return [];
 
@@ -368,30 +376,24 @@ export type TopLiker = {
 };
 
 export const getTopLikers = cache(async (limitCount = 5): Promise<TopLiker[]> => {
-  // Ideally this should be an RPC or SQL View.
-  // We fetch profiles with their like counts directly to avoid fetching huge likes tables.
+  // Computed via the get_top_likers RPC (supabase/migrations/0016) --
+  // GROUP BY + ORDER BY + LIMIT run in SQL, so only limitCount rows cross
+  // the wire instead of every non-elite role="user" profile.
   // Only ever called from the plain-admin dashboard (src/app/(admin)/admin/page.tsx)
   // -- role="user" only, so neither an elite user nor staff (who shouldn't
   // have any recorded likes going forward, see the role check in
   // src/app/actions/like.ts, but may from before it existed) can appear by
   // name in this admin-facing leaderboard.
-  const { data: profiles, error } = await supabase
-    .from("profiles")
-    .select("id, public_id, first_name, last_name, email, is_elite, likes:likes!liker_id(count)")
-    .eq("is_elite", false)
-    .eq("role", "user");
+  const { data, error } = await supabase.rpc("get_top_likers", { p_limit: limitCount });
 
-  if (error || !profiles) return [];
+  if (error || !data) return [];
 
-  const parsed = profiles.map((p: any) => ({
+  return (data as any[]).map((p) => ({
     id: p.id,
     publicId: p.public_id,
     firstName: p.first_name,
     lastName: p.last_name,
     email: p.email,
-    likesCount: p.likes[0]?.count ?? 0,
+    likesCount: Number(p.likes_count) ?? 0,
   }));
-
-  const sorted = parsed.sort((a, b) => b.likesCount - a.likesCount).slice(0, limitCount);
-  return sorted;
 });

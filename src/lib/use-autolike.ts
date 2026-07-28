@@ -277,19 +277,19 @@ export function useAutoLike() {
           return;
         }
 
-        if (tickRef.current > 0 && tickRef.current % 10 === 0) {
+        if (tickRef.current > 0 && tickRef.current % 20 === 0) {
           const latest = await refreshStatus();
           // refreshStatus() returns null on ANY fetch failure -- a dropped
           // packet, a WiFi/cellular handoff, a brief DNS blip, a slow cold
           // start -- indistinguishable here from a genuine server response.
           // Treating null the same as "server confirmed active: false" (the
           // old `!latest?.active` check did) meant a single transient
-          // network hiccup during this ~10-second health check permanently
+          // network hiccup during this ~20-second health check permanently
           // killed an otherwise-healthy session; over an hours-long run on a
           // mobile connection, hitting at least one such blip is likely, not
           // an edge case. Only stop on a real, parsed response that actually
           // says inactive -- a null (failed) check is silently skipped and
-          // retried on the next tick-10 cycle instead.
+          // retried on the next tick-20 cycle instead.
           if (latest && !latest.active) {
             stop();
             return;
@@ -336,7 +336,7 @@ export function useAutoLike() {
                     const latest = await refreshStatus();
                     if (!runningRef.current) return;
                     // Same null-vs-confirmed-inactive distinction as the
-                    // tick-10 health check above -- a failed fetch here
+                    // tick-20 health check above -- a failed fetch here
                     // shouldn't cancel the retry, it should just proceed as
                     // if still active and let the next real check catch a
                     // genuine deactivation.

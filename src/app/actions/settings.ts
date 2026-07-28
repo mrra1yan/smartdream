@@ -5,6 +5,7 @@ import { z } from "zod";
 import { supabase } from "@/lib/supabase";
 import { requireStaff } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
+import { invalidateSettingsCache } from "@/lib/settings";
 
 const nullableNumber = z.preprocess(
   (val) => (val === "" || val === null || val === undefined ? null : val),
@@ -102,6 +103,7 @@ export async function updateSettings(
   }
 
   await logAudit(me, "update_settings", null);
+  invalidateSettingsCache();
 
   revalidatePath("/admin/settings");
   revalidatePath("/");

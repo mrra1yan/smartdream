@@ -54,7 +54,29 @@ const DEFAULTS: SiteSettings = {
   referralRewardRefereeMinutes: 30,
 };
 
+// Module-level TTL cache, shared across requests on the same warm
+// server/isolate (React's cache() below only dedupes within a single
+// request). getSettings() is called on nearly every page load and on every
+// like commit, but the settings row itself only ever changes when an admin
+// edits it via the settings page -- so refetching it fresh on every single
+// request is a lot of Supabase egress for data that's the same 99.9% of the
+// time. A 45s staleness window is the trade-off: an admin's settings change
+// can take up to 45s to take effect everywhere, same order of magnitude as
+// the staleness already accepted for feed likes_count.
+const SETTINGS_CACHE_TTL_MS = 45_000;
+let cachedSettings: { value: SiteSettings; expiresAt: number } | null = null;
+
+/** Call after any write to the `settings` table so the admin who just saved
+ * sees their own change immediately instead of waiting out the TTL. */
+export function invalidateSettingsCache(): void {
+  cachedSettings = null;
+}
+
 export const getSettings = cache(async (): Promise<SiteSettings> => {
+  if (cachedSettings && cachedSettings.expiresAt > Date.now()) {
+    return cachedSettings.value;
+  }
+
   let row: Settings | undefined;
 
   try {
@@ -70,10 +92,13 @@ export const getSettings = cache(async (): Promise<SiteSettings> => {
     row = data as Settings;
   } catch (error) {
     console.error("[SETTINGS] Unable to load site settings:", error);
-    return DEFAULTS;
+    // Don't cache a failure -- a transient outage shouldn't force every
+    // request for the next 45s to silently fall back to DEFAULTS once the
+    // DB recovers before the TTL expires.
+    return cachedSettings?.value ?? DEFAULTS;
   }
 
-  return {
+  const settings = {
     whatsappNumber: row.whatsapp_number ?? "",
     activeLikeCount: row.active_like_count ?? DEFAULTS.activeLikeCount,
     activeWindowHours: row.active_window_hours ?? DEFAULTS.activeWindowHours,
@@ -99,4 +124,7 @@ export const getSettings = cache(async (): Promise<SiteSettings> => {
     referralRewardReferrerMinutes: row.referral_reward_referrer_minutes ?? DEFAULTS.referralRewardReferrerMinutes,
     referralRewardRefereeMinutes: row.referral_reward_referee_minutes ?? DEFAULTS.referralRewardRefereeMinutes,
   };
+
+  cachedSettings = { value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };
+  return settings;
 });

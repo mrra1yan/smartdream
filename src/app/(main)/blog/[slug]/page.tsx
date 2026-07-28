@@ -7,6 +7,11 @@ import { getBlogBySlug } from "@/lib/blog";
 
 type Props = { params: Promise<{ slug: string }> };
 
+// Note: this route renders dynamically on every request regardless (the
+// parent (main)/layout.tsx calls requireUser(), which reads the session
+// cookie), so a route-level `revalidate` export here would be a no-op.
+// getBlogBySlug() itself is cached instead -- see src/lib/blog.ts.
+
 export async function generateMetadata({ params }: Props): Promise<Metadata> {
   const { slug } = await params;
   const blog = await getBlogBySlug(slug);

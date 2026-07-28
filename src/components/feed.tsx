@@ -4,21 +4,23 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useI18n } from "@/components/i18n-provider";
 import { LinkCard, type FeedLink } from "@/components/link-card";
 import { useAdStore } from "@/lib/ad-store";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 import { MAX_CONCURRENT_ADS } from "@/lib/types";
 
 // How often buffered-but-unrendered links get flushed into the actually
 // rendered list (see bufferRef below), and how often the list gets
 // re-validated against a fresh scan.
 const FLUSH_INTERVAL_MS = 800;
-// likes_count itself is kept live by the realtime channel below -- this
-// interval only needs to be frequent enough to prune stale/liked-out links
-// and surface newly-eligible ones, not to keep counts fresh.
-const REVALIDATE_INTERVAL_MS = 60_000;
+// likes_count freshness is bounded by this revalidate cycle -- there is no
+// realtime subscription for it (removed: an unfiltered postgres_changes
+// subscription on the entire `links` table broadcast every like anywhere in
+// the app to every open feed tab regardless of relevance, which was a
+// significant Supabase egress cost that scaled with likes × concurrent
+// viewers rather than with actual relevance).
+const REVALIDATE_INTERVAL_MS = 120_000;
 // Cap background prefetch / revalidate pages. Unbounded pagination was
 // hammering /api/feed (offset 0→400+) and saturating the Supabase path.
-const MAX_PREFETCH_PAGES = 2; // SSR page + 2 more ≈ 150 links
-const MAX_REVALIDATE_PAGES = 3;
+const MAX_PREFETCH_PAGES = 1; // SSR page + 1 more ≈ 100 links
+const MAX_REVALIDATE_PAGES = 2;
 
 /** Keep first occurrence of each link.id — prevents React duplicate-key errors. */
 function dedupeById(list: FeedLink[]): FeedLink[] {
@@ -158,8 +160,9 @@ export function Feed({
     }
 
     // Skip the periodic full-list rescan while the tab/app is backgrounded --
-    // likes_count itself stays live via the realtime channel below, so this
-    // interval only needs to run when someone could actually see the result.
+    // nothing needs to happen while no one can see the result, and this is
+    // now the only mechanism keeping likes_count fresh (see
+    // REVALIDATE_INTERVAL_MS above).
     const interval = setInterval(() => {
       if (document.hidden) return;
       void revalidate();
@@ -173,30 +176,6 @@ export function Feed({
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [endpoint, visibleLinks.length]);
-
-  useEffect(() => {
-    const supabase = createSupabaseBrowserClient();
-    const channel = supabase
-      .channel('public:links')
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'links' },
-        (payload) => {
-          setLinks((currentLinks) =>
-            currentLinks.map((l) =>
-              l.id === payload.new.id
-                ? { ...l, likesCount: payload.new.likes_count }
-                : l
-            )
-          );
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, []);
 
   if (!loading && visibleLinks.length === 0) {
     return (

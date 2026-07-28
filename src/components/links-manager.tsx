@@ -20,6 +20,7 @@ const NOOP: (s: LinkFormState, fd: FormData) => Promise<LinkFormState> = async (
 
 export function LinksManager({
   links,
+  userId,
   canAdd,
   addActionHandler,
   updateActionHandler,
@@ -28,6 +29,7 @@ export function LinksManager({
   bulkDeleteActionHandler,
 }: {
   links: LinkItem[];
+  userId: string;
   canAdd: boolean;
   addActionHandler: (state: LinkFormState, formData: FormData) => Promise<LinkFormState>;
   updateActionHandler: (id: string, state: LinkFormState, formData: FormData) => Promise<LinkFormState>;
@@ -65,9 +67,10 @@ export function LinksManager({
         event: 'UPDATE',
         schema: 'public',
         table: 'links',
+        filter: `user_id=eq.${userId}`,
       }, (payload) => {
         const updatedLink = payload.new as any;
-        setLocalLinks((prev) => 
+        setLocalLinks((prev) =>
           prev.map(link => link.id === updatedLink.id ? { ...link, likesCount: updatedLink.likes_count } : link)
         );
       })
@@ -76,7 +79,7 @@ export function LinksManager({
     return () => {
       supabase.removeChannel(channel);
     };
-  }, []);
+  }, [userId]);
 
   const handleCopy = (id: string, url: string) => {
     navigator.clipboard.writeText(url).then(() => {

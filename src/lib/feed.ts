@@ -11,26 +11,6 @@ export type FeedLinkRow = {
   isBoosted?: boolean;
 };
 
-function hoursAgoISO(h: number): string {
-  return new Date(Date.now() - h * 3600000).toISOString();
-}
-
-async function fetchAll<T>(
-  queryFn: (from: number, to: number) => Promise<{ data: T[] | null; error: any }>
-): Promise<T[]> {
-  const allData: T[] = [];
-  let from = 0;
-  const size = 1000;
-  while (true) {
-    const { data, error } = await queryFn(from, from + size - 1);
-    if (error || !data || data.length === 0) break;
-    allData.push(...data);
-    if (data.length < size) break;
-    from += size;
-  }
-  return allData;
-}
-
 export async function getFeed(
   viewerId: string,
   offset = 0,

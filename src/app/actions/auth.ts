@@ -110,12 +110,13 @@ export async function signup(_state: AuthFormState, formData: FormData) {
       };
     }
 
-    // Check duplicate email (friendly error before hitting Supabase Auth).
-    const { data: existingEmail } = await supabase
-      .from("profiles")
-      .select("id")
-      .eq("email", parsed.data.email)
-      .single();
+    // Check duplicate email and phone (friendly error before hitting
+    // Supabase Auth) -- independent lookups, run in parallel instead of
+    // paying two sequential round-trips.
+    const [{ data: existingEmail }, { data: existingPhone }] = await Promise.all([
+      supabase.from("profiles").select("id").eq("email", parsed.data.email).single(),
+      supabase.from("profiles").select("id").eq("phone", parsed.data.phone).single(),
+    ]);
 
     if (existingEmail) {
       console.error("[SIGNUP_DEBUG] Email already exists:", parsed.data.email);
@@ -130,13 +131,6 @@ export async function signup(_state: AuthFormState, formData: FormData) {
         }
       };
     }
-
-    // Check duplicate phone.
-    const { data: existingPhone } = await supabase
-      .from("profiles")
-      .select("id")
-      .eq("phone", parsed.data.phone)
-      .single();
 
     if (existingPhone) {
       console.error("[SIGNUP_DEBUG] Phone already exists:", parsed.data.phone);

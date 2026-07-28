@@ -6,6 +6,10 @@ import { getI18n } from "@/lib/i18n";
 import { PageHeader } from "@/components/page-header";
 
 export const metadata: Metadata = { title: "Blog | Smart Dream" };
+// Note: this route renders dynamically on every request regardless (the
+// parent (main)/layout.tsx calls requireUser(), which reads the session
+// cookie), so a route-level `revalidate` export here would be a no-op.
+// getBlogs() itself is cached instead -- see src/lib/blog.ts.
 
 export default async function BlogPage() {
   const { t } = await getI18n();

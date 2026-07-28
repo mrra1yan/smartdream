@@ -1,6 +1,6 @@
 "use server";
 
-import { revalidatePath } from "next/cache";
+import { revalidatePath, revalidateTag } from "next/cache";
 import { z } from "zod";
 import { supabase } from "@/lib/supabase";
 import { requireStaff } from "@/lib/auth";
@@ -81,6 +81,12 @@ export async function saveBlog(
     }
   }
 
+  // revalidatePath only clears Next.js's route-level render cache; the
+  // underlying getBlogs()/getBlogBySlug() data is cached separately via
+  // unstable_cache (see src/lib/blog.ts) and needs its own invalidation so
+  // a just-published/edited post doesn't wait out the 5-minute data-cache
+  // TTL on top of this.
+  revalidateTag("blogs");
   revalidatePath("/blog");
   revalidatePath("/admin/blog");
   revalidatePath("/");
@@ -95,6 +101,7 @@ export async function deleteBlog(id: string) {
     console.error("deleteBlog error:", error);
   }
 
+  revalidateTag("blogs");
   revalidatePath("/blog");
   revalidatePath("/admin/blog");
   revalidatePath("/");

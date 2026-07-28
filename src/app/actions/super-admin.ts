@@ -7,6 +7,7 @@ import { supabaseAdmin } from "@/lib/supabase/admin";
 import { requireSuperAdmin } from "@/lib/auth";
 import { getReferralStats } from "@/lib/admin";
 import { logAudit } from "@/lib/audit";
+import { invalidateSettingsCache } from "@/lib/settings";
 
 export type SuperResult = { ok?: boolean; error?: string };
 
@@ -56,20 +57,12 @@ export async function createEliteUser(args: CreateArgs) {
   const parsed = CreateUserSchema.safeParse(args);
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
-  const { data: existingEmail } = await supabase
-    .from("profiles")
-    .select("id")
-    .eq("email", parsed.data.email)
-    .single();
+  const [{ data: existingEmail }, { data: existingPhone }] = await Promise.all([
+    supabase.from("profiles").select("id").eq("email", parsed.data.email).single(),
+    supabase.from("profiles").select("id").eq("phone", parsed.data.phone).single(),
+  ]);
 
   if (existingEmail) return { error: "Email already exists." };
-
-  const { data: existingPhone } = await supabase
-    .from("profiles")
-    .select("id")
-    .eq("phone", parsed.data.phone)
-    .single();
-
   if (existingPhone) return { error: "Phone number already exists." };
 
   // Create the auth user. The DB trigger auto-creates a `profiles` row with
@@ -120,12 +113,16 @@ export async function deleteEliteUser(userId: string): Promise<SuperResult> {
     const me = await requireSuperAdmin();
     await failIfSuperAdmin(userId);
 
-    await supabase.from("likes").delete().eq("liker_id", userId);
-    await supabase.from("likes").delete().eq("receiver_id", userId);
-    await supabase.from("links").delete().eq("user_id", userId);
-    await supabase.from("blogs").update({ created_by: null }).eq("created_by", userId);
-    await supabase.from("profiles").update({ referred_by: null }).eq("referred_by", userId);
-    await supabase.from("profiles").update({ approved_by: null }).eq("approved_by", userId);
+    // None of these 6 cleanup statements depend on each other's results, so
+    // run them concurrently instead of paying 6 sequential round-trips.
+    await Promise.all([
+      supabase.from("likes").delete().eq("liker_id", userId),
+      supabase.from("likes").delete().eq("receiver_id", userId),
+      supabase.from("links").delete().eq("user_id", userId),
+      supabase.from("blogs").update({ created_by: null }).eq("created_by", userId),
+      supabase.from("profiles").update({ referred_by: null }).eq("referred_by", userId),
+      supabase.from("profiles").update({ approved_by: null }).eq("approved_by", userId),
+    ]);
 
     const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
     if (error) {
@@ -222,20 +219,12 @@ export async function createAdmin(args: CreateArgs) {
   const parsed = CreateUserSchema.safeParse(args);
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
-  const { data: existingEmail } = await supabase
-    .from("profiles")
-    .select("id")
-    .eq("email", parsed.data.email)
-    .single();
+  const [{ data: existingEmail }, { data: existingPhone }] = await Promise.all([
+    supabase.from("profiles").select("id").eq("email", parsed.data.email).single(),
+    supabase.from("profiles").select("id").eq("phone", parsed.data.phone).single(),
+  ]);
 
   if (existingEmail) return { error: "Email already exists." };
-
-  const { data: existingPhone } = await supabase
-    .from("profiles")
-    .select("id")
-    .eq("phone", parsed.data.phone)
-    .single();
-
   if (existingPhone) return { error: "Phone number already exists." };
 
   // Create the auth user. The DB trigger auto-creates a `profiles` row; we
@@ -299,6 +288,7 @@ export async function setEliteWeight(value: number): Promise<SuperResult> {
   }
 
   await logAudit(me, "set_elite_weight", null, { value: Math.round(value) });
+  invalidateSettingsCache();
 
   revalidatePath("/super-admin/settings");
   return { ok: true };
@@ -358,6 +348,7 @@ export async function setLevelReferralSettings(args: LevelReferralSettingsArgs):
     referral_reward_referrer_minutes: Math.round(referralRewardReferrerMinutes),
     referral_reward_referee_minutes: Math.round(referralRewardRefereeMinutes),
   });
+  invalidateSettingsCache();
 
   revalidatePath("/super-admin/settings");
   return { ok: true };

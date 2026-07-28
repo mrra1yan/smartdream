@@ -28,6 +28,8 @@ export type SessionProfile = {
   autoLikeUsed: number;
   freeAutoLikeUntil: string | null;
   autoLikePaused: boolean;
+  autoLikePausedRemainingMinutes: number | null;
+  freeAutolikePausedRemainingMinutes: number | null;
   boostedOfferCount: number;
   referredBy: string | null;
   approvedBy: string | null;
@@ -70,6 +72,8 @@ export const getCurrentUser = cache(async (): Promise<SessionProfile | null> => 
     autoLikeUsed: row.auto_like_used,
     freeAutoLikeUntil: row.free_autolike_until,
     autoLikePaused: Boolean(row.auto_like_paused),
+    autoLikePausedRemainingMinutes: row.auto_like_paused_remaining_minutes,
+    freeAutolikePausedRemainingMinutes: row.free_autolike_paused_remaining_minutes,
     boostedOfferCount: row.boosted_offer_count,
     referredBy: row.referred_by,
     approvedBy: row.approved_by,

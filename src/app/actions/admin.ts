@@ -126,12 +126,16 @@ export async function rejectUser(userId: string): Promise<AdminActionResult> {
     if (userId.startsWith("mock-")) return { ok: true };
     await failIfElite(userId);
 
-    await supabase.from("likes").delete().eq("liker_id", userId);
-    await supabase.from("likes").delete().eq("receiver_id", userId);
-    await supabase.from("links").delete().eq("user_id", userId);
-    await supabase.from("blogs").update({ created_by: null }).eq("created_by", userId);
-    await supabase.from("profiles").update({ referred_by: null }).eq("referred_by", userId);
-    await supabase.from("profiles").update({ approved_by: null }).eq("approved_by", userId);
+    // None of these 6 cleanup statements depend on each other's results, so
+    // run them concurrently instead of paying 6 sequential round-trips.
+    await Promise.all([
+      supabase.from("likes").delete().eq("liker_id", userId),
+      supabase.from("likes").delete().eq("receiver_id", userId),
+      supabase.from("links").delete().eq("user_id", userId),
+      supabase.from("blogs").update({ created_by: null }).eq("created_by", userId),
+      supabase.from("profiles").update({ referred_by: null }).eq("referred_by", userId),
+      supabase.from("profiles").update({ approved_by: null }).eq("approved_by", userId),
+    ]);
 
     const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
     if (error) {

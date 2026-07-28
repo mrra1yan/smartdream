@@ -40,20 +40,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid origin" }, { status: 403 });
   }
 
-  const { data: profile, error } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", user.id)
-    .single();
-
-  if (error || !profile) {
-    return NextResponse.json({ error: "profile not found" }, { status: 404 });
-  }
-
+  // Reuse the already-fetched (React-cache-deduped) profile from
+  // getCurrentUser() at the top of this handler instead of issuing a
+  // second, identical `profiles.select("*")` for the same row.
   const { action } = await request.json();
 
   if (action === "pause") {
-    if ((profile as any).auto_like_paused) {
+    if (user.autoLikePaused) {
       return NextResponse.json(await getAutoLikeStatus());
     }
 
@@ -61,18 +54,18 @@ export async function POST(request: Request) {
     const nowIso = new Date(now).toISOString();
 
     let paidRemainingMins = null;
-    if ((profile as any).auto_like_model === "time" && (profile as any).auto_like_expiry) {
+    if (user.autoLikeModel === "time" && user.autoLikeExpiry) {
       paidRemainingMins = Math.max(
         0,
-        Math.floor((new Date((profile as any).auto_like_expiry).getTime() - now) / 60000)
+        Math.floor((new Date(user.autoLikeExpiry).getTime() - now) / 60000)
       );
     }
 
     let freeRemainingMins = null;
-    if ((profile as any).free_autolike_until && (profile as any).free_autolike_until > nowIso) {
+    if (user.freeAutoLikeUntil && user.freeAutoLikeUntil > nowIso) {
       freeRemainingMins = Math.max(
         0,
-        Math.floor((new Date((profile as any).free_autolike_until).getTime() - now) / 60000)
+        Math.floor((new Date(user.freeAutoLikeUntil).getTime() - now) / 60000)
       );
     }
 
@@ -88,18 +81,18 @@ export async function POST(request: Request) {
       .eq("id", user.id);
 
   } else if (action === "resume") {
-    if (!(profile as any).auto_like_paused) {
+    if (!user.autoLikePaused) {
       return NextResponse.json(await getAutoLikeStatus());
     }
 
     let newPaidExpiry = null;
-    if ((profile as any).auto_like_paused_remaining_minutes != null && (profile as any).auto_like_paused_remaining_minutes > 0) {
-      newPaidExpiry = new Date(Date.now() + (profile as any).auto_like_paused_remaining_minutes * 60000).toISOString();
+    if (user.autoLikePausedRemainingMinutes != null && user.autoLikePausedRemainingMinutes > 0) {
+      newPaidExpiry = new Date(Date.now() + user.autoLikePausedRemainingMinutes * 60000).toISOString();
     }
 
     let newFreeUntil = null;
-    if ((profile as any).free_autolike_paused_remaining_minutes != null && (profile as any).free_autolike_paused_remaining_minutes > 0) {
-      newFreeUntil = new Date(Date.now() + (profile as any).free_autolike_paused_remaining_minutes * 60000).toISOString();
+    if (user.freeAutolikePausedRemainingMinutes != null && user.freeAutolikePausedRemainingMinutes > 0) {
+      newFreeUntil = new Date(Date.now() + user.freeAutolikePausedRemainingMinutes * 60000).toISOString();
     }
 
     await supabase

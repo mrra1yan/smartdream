@@ -25,6 +25,7 @@ export default async function LinksPage() {
   return (
     <LinksManager
       links={links}
+      userId={user.id}
       canAdd={links.length < MAX_LINKS_PER_USER}
       addActionHandler={addLink}
       updateActionHandler={updateLink}
