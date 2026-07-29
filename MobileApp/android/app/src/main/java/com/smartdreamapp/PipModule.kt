@@ -62,7 +62,7 @@ class PipModule(private val reactContext: ReactApplicationContext) :
      */
     @ReactMethod
     fun exitPip() {
-        val activity = currentActivity ?: reactContext.currentActivity ?: return
+        val activity = reactContext.currentActivity ?: return
         // moveTaskToBack sends the activity behind all other tasks, which
         // also exits PiP mode since the system only keeps one PiP window.
         activity.moveTaskToBack(true)
