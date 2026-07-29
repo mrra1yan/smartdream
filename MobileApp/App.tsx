@@ -172,12 +172,24 @@ function App(): React.JSX.Element {
         const pipEmitter = new NativeEventEmitter(PipModule);
         pipEventSubscription = pipEmitter.addListener('onPipModeChanged', (event: boolean) => {
           setPipActive(event);
-          // Sync to FloatingWidgetModule for fallback (see AppState listener)
-          if (!event && adsRef.current.length > 0 && autoLikeActiveRef.current && FloatingWidgetModule) {
-            // PiP was dismissed (user swiped it away) but Auto-Like is still
-            // active — start the floating widget service as a fallback to
-            // keep the process alive and ads running.
-            FloatingWidgetModule.startService(JSON.stringify(adsRef.current));
+          if (event) {
+            // ── PiP just activated ─────────────────────────────────────
+            // The Activity is now paused (onPause fired). React Native's JS
+            // thread may be suspended by the OS, which would stop the
+            // HEARTBEAT setInterval → main WebView JS timers get throttled
+            // → ads stop auto-closing. Start the FloatingWidgetService as a
+            // foreground service to keep the process alive and the HEARTBEAT
+            // pumping every second, just like the old overlay approach.
+            if (adsRef.current.length > 0 && autoLikeActiveRef.current && FloatingWidgetModule) {
+              FloatingWidgetModule.startService(JSON.stringify(adsRef.current));
+            }
+          } else {
+            // ── PiP dismissed (user tapped to return or swiped away) ────
+            // Keep the foreground service running as a fallback — the
+            // process is still backgrounded.
+            if (adsRef.current.length > 0 && autoLikeActiveRef.current && FloatingWidgetModule) {
+              FloatingWidgetModule.startService(JSON.stringify(adsRef.current));
+            }
           }
         });
       } catch (_) {
