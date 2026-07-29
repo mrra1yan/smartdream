@@ -513,12 +513,32 @@ function App(): React.JSX.Element {
         {/* Floating Container for Multiple Ads at the bottom */}
         {/* Always visible — in normal mode it sits at the bottom, and in PiP
             mode it fills the entire PiP window since the main WebView is hidden. */}
+        {/* Floating Container for Multiple Ads at the bottom */}
+        {/* Always visible — in normal mode it sits at the bottom, and in PiP
+            mode it fills the entire PiP window since the main WebView is hidden. */}
         <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, ads.length === 0 && { display: 'none' }]}>
           <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent} bounces={false} overScrollMode="never">
             {[0, 1, 2].map((index) => {
-              const ad = ads[index];
+              // Properly map ads to fixed slots so they never shift/reload when other ads are removed
+              const ad = ads.find(a => {
+                if (!a) return false;
+                if ((a as any)._slot === undefined) {
+                  // Find first available slot
+                  const usedSlots = new Set(ads.map(x => (x as any)._slot));
+                  let nextSlot = 0;
+                  while (usedSlots.has(nextSlot)) nextSlot++;
+                  (a as any)._slot = nextSlot;
+                }
+                return (a as any)._slot === index;
+              });
+
               return (
-              <View key={`ad-slot-${index}`} style={[styles.floatingAdContainer, pipActive && styles.floatingAdContainerPip, !ad && { display: 'none' }]}>
+              <View key={`ad-slot-${index}`} style={[
+                styles.floatingAdContainer, 
+                pipActive && styles.floatingAdContainerPip, 
+                pipActive && { position: 'absolute', top: 4, left: 10, right: 10, bottom: 4 }, // Stack them absolutely in PiP so all are in viewport
+                !ad && { display: 'none' }
+              ]}>
                 <View style={styles.adHeader}>
                   <Text style={styles.adTitle}>Ad is active</Text>
                   <TouchableOpacity onPress={() => ad && closeAdManually(ad.linkId)} style={styles.closeBtn}>
