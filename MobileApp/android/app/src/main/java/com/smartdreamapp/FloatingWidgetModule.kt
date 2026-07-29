@@ -69,9 +69,13 @@ class FloatingWidgetModule(private val reactContext: ReactApplicationContext) :
 
     @ReactMethod
     fun startService(adsJson: String) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M && !Settings.canDrawOverlays(reactContext)) {
-            return
-        }
+        // ── No overlay permission check ──────────────────────────────────
+        // Previously this returned early if !Settings.canDrawOverlays(),
+        // which blocked the foreground service entirely. Now the service
+        // always starts — it shows a notification and keeps the process
+        // alive for HEARTBEAT / auto-like. If overlay permission IS granted,
+        // setupFloatingWindow() in the service will also show the floating
+        // widget as a visual bonus.
         val intent = Intent(reactContext, FloatingWidgetService::class.java).apply {
             putExtra("ads_json", adsJson)
         }
