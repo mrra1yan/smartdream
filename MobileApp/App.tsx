@@ -254,7 +254,13 @@ function App(): React.JSX.Element {
       // ── Keep PipModule in sync with current ad state ─────────────
       // Whenever ads or auto-like state changes, update PipModule so
       // onUserLeaveHint() always has the latest picture.
-      if (ads.length > 0 && autoLikeActiveRef.current) {
+      // IMPORTANT: keep pipReady=true when PiP is active and auto-like is
+      // running, even if ads is temporarily [] between batches. Otherwise
+      // the user could press Home during the 1-3s gap between ad batches
+      // and PiP would not enter.
+      const shouldBePipReady = autoLikeActiveRef.current &&
+        (ads.length > 0 || pipActiveRef.current);
+      if (shouldBePipReady) {
         PipModule?.setPipReady(true, JSON.stringify(ads));
       } else {
         PipModule?.setPipReady(false, '[]');
