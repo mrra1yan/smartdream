@@ -152,6 +152,7 @@ function App(): React.JSX.Element {
   adsRef.current = ads;
   const appStateRef = useRef<string>(AppState.currentState);
   const autoLikeActiveRef = useRef<boolean>(false);
+  const pipActiveRef = useRef<boolean>(false);
 
   useEffect(() => {
     fetchConfig();
@@ -172,6 +173,7 @@ function App(): React.JSX.Element {
         const pipEmitter = new NativeEventEmitter(PipModule);
         pipEventSubscription = pipEmitter.addListener('onPipModeChanged', (event: boolean) => {
           setPipActive(event);
+          pipActiveRef.current = event;
           if (event) {
             // ── PiP just activated ─────────────────────────────────────
             // The Activity is now paused (onPause fired). React Native's JS
@@ -224,6 +226,7 @@ function App(): React.JSX.Element {
           // Disable PiP readiness (onUserLeaveHint won't fire now).
           PipModule?.setPipReady(false, '[]');
           setPipActive(false);
+          pipActiveRef.current = false;
 
           // Stop any floating widget fallback service.
           if (FloatingWidgetModule) {
@@ -258,19 +261,21 @@ function App(): React.JSX.Element {
       }
 
       if (FloatingWidgetModule) {
-        // Only start/update the floating overlay when confirmed backgrounded
-        // AND the user has an active Auto-Like subscription.
-        // stopService is always safe to call (no-op if not running).
-        if (ads.length > 0 && autoLikeActiveRef.current && (appStateRef.current === 'background' || appStateRef.current === 'inactive')) {
+        // Keep service running when backgrounded + auto-like active.
+        // If ads are temporarily 0 but PiP is active and auto-like is
+        // running, DON'T stop — the auto-like loop will fetch new ads
+        // within seconds, and stopping/recreating the foreground service
+        // creates a kill window where aggressive OEMs could terminate
+        // the process before new ads arrive.
+        const inBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
+        const shouldRun = autoLikeActiveRef.current && inBackground &&
+          (ads.length > 0 || pipActiveRef.current);
+
+        if (shouldRun) {
           FloatingWidgetModule.updateAds(JSON.stringify(ads));
         } else {
           FloatingWidgetModule.stopService();
         }
-        // When ads.length > 0 but app is in foreground ('active'):
-        // do nothing — the in-app WebView ad container handles it.
-        // The AppState 'change' listener above will stopService when
-        // transitioning to 'active', and startService when transitioning
-        // to 'background'.
       }
     }
   }, [ads]);
