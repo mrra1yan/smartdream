@@ -119,7 +119,7 @@ export async function signup(_state: AuthFormState, formData: FormData) {
     ]);
 
     if (existingEmail) {
-      console.error("[SIGNUP_DEBUG] Email already exists:", parsed.data.email);
+      console.error("[SIGNUP_DEBUG] Email already exists: [redacted]");
       return {
         message: t("auth.errorEmailExists"),
         values: {
@@ -133,7 +133,7 @@ export async function signup(_state: AuthFormState, formData: FormData) {
     }
 
     if (existingPhone) {
-      console.error("[SIGNUP_DEBUG] Phone already exists:", parsed.data.phone);
+      console.error("[SIGNUP_DEBUG] Phone already exists: [redacted]");
       return {
         message: t("auth.errorPhoneExists") || "Phone number already exists.",
         values: {

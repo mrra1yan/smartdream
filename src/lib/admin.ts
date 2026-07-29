@@ -48,9 +48,9 @@ export const getAdminCounts = cache(async (): Promise<AdminCounts> => {
   // table read that scaled linearly with the user base for a handful of
   // numbers the database can compute directly.
   const [total, pending, admins] = await Promise.all([
-    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "user").eq("status", "approved").eq("is_elite", false),
-    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("status", "pending").in("role", ["user", "admin"]).eq("is_elite", false),
-    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "admin").eq("is_elite", false),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "user").eq("status", "approved").eq("is_elite", false),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("status", "pending").in("role", ["user", "admin"]).eq("is_elite", false),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "admin").eq("is_elite", false),
   ]);
 
   return {
@@ -123,7 +123,13 @@ export const getAllUsers = cache(async (): Promise<AdminProfile[]> => {
 
 export const searchUsers = cache(
   async (query: string): Promise<AdminProfile[]> => {
-    const term = query.trim();
+    const raw = query.trim();
+    if (!raw) return [];
+
+    // Sanitize: strip PostgREST filter-significant characters to prevent
+    // filter injection through the .or() string below. Allowed: word chars,
+    // spaces, hyphens, @, +, . (safe in ilike patterns).
+    const term = raw.replace(/[^\w\s\-@+.@]/g, "").slice(0, 100);
     if (!term) return [];
 
     const { data, error } = await supabase
@@ -214,8 +220,8 @@ export const getUserStats = cache(
 
     const [givenToday, receivedToday] =
       await Promise.all([
-        supabase.from("likes").select("*", { count: "exact", head: true }).eq("liker_id", userId).gte("created_at", todayIso),
-        supabase.from("likes").select("*", { count: "exact", head: true }).eq("receiver_id", userId).gte("created_at", todayIso),
+        supabase.from("likes").select("id", { count: "exact", head: true }).eq("liker_id", userId).gte("created_at", todayIso),
+        supabase.from("likes").select("id", { count: "exact", head: true }).eq("receiver_id", userId).gte("created_at", todayIso),
       ]);
 
     return {
@@ -278,7 +284,7 @@ export const getReferralStats = cache(
 
     const { count } = await supabase
       .from("profiles")
-      .select("*", { count: "exact", head: true })
+      .select("id", { count: "exact", head: true })
       .eq("referred_by", userId);
 
     return {

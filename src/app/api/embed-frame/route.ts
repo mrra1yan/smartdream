@@ -205,6 +205,22 @@ async function safeFetch(startUrl: URL, request: NextRequest, proxyCookies: stri
   const userAgent = request.headers.get("user-agent") || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
   const acceptLang = request.headers.get("accept-language") || "en-US,en;q=0.5";
   const userIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "127.0.0.1";
+  const acceptEnc = request.headers.get("accept-encoding") || "gzip, deflate, br";
+
+  // ── Traffic-quality headers ──────────────────────────────────────────
+  // Missing Referer/Origin/Sec-Fetch-* are classic bot/proxy signals.
+  // Forwarding the real user's headers lets ad networks verify the request
+  // came from a real browser on a real publisher page → higher CPM.
+  const referer = request.headers.get("referer") || "";
+  const origin = request.headers.get("origin") || "";
+  const secFetchDest = request.headers.get("sec-fetch-dest") || "iframe";
+  const secFetchMode = request.headers.get("sec-fetch-mode") || "navigate";
+  const secFetchSite = request.headers.get("sec-fetch-site") || "cross-site";
+  const secFetchUser = request.headers.get("sec-fetch-user") || "?1";
+  const dnt = request.headers.get("dnt") || "";
+  // Cloudflare GEO header — ad networks use this for country targeting.
+  // If the app is behind Cloudflare, this is set automatically.
+  const cfIpCountry = request.headers.get("cf-ipcountry") || "";
 
   for (let hop = 0; hop <= MAX_REDIRECTS; hop++) {
     if (!["http:", "https:"].includes(current.protocol)) {
@@ -217,9 +233,28 @@ async function safeFetch(startUrl: URL, request: NextRequest, proxyCookies: stri
       "User-Agent": userAgent,
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language": acceptLang,
+      "Accept-Encoding": acceptEnc,
       "X-Forwarded-For": userIp,
       "CF-Connecting-IP": userIp,
     });
+
+    // ── Traffic-quality headers (forward only if present) ────────────
+    // These prevent ad networks from flagging proxied requests as bots.
+    if (referer) headers.set("Referer", referer);
+    if (origin) headers.set("Origin", origin);
+    headers.set("Sec-Fetch-Dest", secFetchDest);
+    headers.set("Sec-Fetch-Mode", secFetchMode);
+    headers.set("Sec-Fetch-Site", secFetchSite);
+    if (secFetchUser) headers.set("Sec-Fetch-User", secFetchUser);
+    if (dnt) headers.set("DNT", dnt);
+    if (cfIpCountry) headers.set("CF-IPCountry", cfIpCountry);
+
+    // Use the first-hop Referer as the effective referrer for all redirect
+    // hops too — ad networks just need to see a non-empty Referer from a
+    // real publisher domain to pass basic quality checks.
+    if (hop > 0 && referer) {
+      headers.set("Referer", referer);
+    }
 
     if (proxyCookies) {
       headers.set("Cookie", proxyCookies);

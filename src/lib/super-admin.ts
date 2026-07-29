@@ -68,10 +68,10 @@ export const getSuperCounts = cache(async (): Promise<SuperCounts> => {
   // row over the wire and counting in JS (see getAdminCounts for the same
   // pattern in the plain-admin dashboard).
   const [elite, admins, users, pending] = await Promise.all([
-    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("is_elite", true),
-    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "admin"),
-    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("role", "user").eq("is_elite", false).eq("status", "approved"),
-    supabase.from("profiles").select("*", { count: "exact", head: true }).eq("status", "pending").eq("is_elite", false),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("is_elite", true),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "admin"),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("role", "user").eq("is_elite", false).eq("status", "approved"),
+    supabase.from("profiles").select("id", { count: "exact", head: true }).eq("status", "pending").eq("is_elite", false),
   ]);
 
   return {

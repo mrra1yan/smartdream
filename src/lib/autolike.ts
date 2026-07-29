@@ -34,7 +34,13 @@ export async function getAutoLikeStatus(): Promise<AutoLikeStatus> {
 
   const { data, error } = await supabase
     .from("profiles")
-    .select("*")
+    // Narrow column selection — getAutoLikeStatus only uses 9 of 28 columns.
+    // Every ~20s during Auto-Like, a SELECT * was pulling 2 KB of unused data
+    // across the wire (boost prices, level thresholds, etc.). Explicit columns
+    // cut per-call egress by ~68 %.
+    .select(
+      "auto_like_enabled, auto_like_paused, auto_like_model, auto_like_expiry, auto_like_quota, auto_like_used, free_autolike_until, auto_like_paused_remaining_minutes, free_autolike_paused_remaining_minutes",
+    )
     .eq("id", session.sub)
     .single();
 

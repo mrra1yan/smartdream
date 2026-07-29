@@ -29,9 +29,11 @@ export function SignupForm({
   const [terms, setTerms] = useState(false);
 
   useEffect(() => {
-    if (state) {
-      console.log("[SIGNUP_DEBUG] Form state updated:", state);
-    }
+	    if (state) {
+	      if (process.env.NODE_ENV === "development") {
+	        console.log("[SIGNUP_DEBUG] Form state updated:", state);
+	      }
+	    }
     if (state?.message) {
       toast.error(state.message);
     }

@@ -1,9 +1,23 @@
 "use server";
 
 import { supabase } from "@/lib/supabase";
+import { getCurrentUser } from "@/lib/auth";
 import { toBangladeshLocal, bangladeshDateKey, fromBangladeshLocalISO } from "@/lib/timezone";
 
 export async function getWeeklyLikeStats(userId: string) {
+  // ── Auth check (fixes IDOR — previously anyone could fetch any user's stats) ─
+  const user = await getCurrentUser();
+  if (!user || user.status !== "approved") {
+    // Return empty stats rather than throwing — the chart component is
+    // client-rendered and a thrown error would crash the page.
+    const now = toBangladeshLocal();
+    const monday = new Date(now);
+    monday.setUTCHours(0, 0, 0, 0);
+    return { startDate: fromBangladeshLocalISO(monday), endDate: "", stats: [] };
+  }
+  // Only allow fetching your own stats (admin/super-admin can use admin APIs instead)
+  const effectiveUserId = user.id;
+
   // Week/day boundaries computed on the Bangladesh wall clock, not
   // server-local (UTC) time -- see src/lib/timezone.ts. Otherwise a like
   // given between midnight and 6am Dhaka time lands one calendar day (and
@@ -30,10 +44,13 @@ export async function getWeeklyLikeStats(userId: string) {
 
   const { data: userLikes, error } = await supabase
     .from("likes")
-    .select("*")
+    // Only 3 columns are ever read (liker_id vs userId, receiver_id vs userId,
+    // created_at for day bucketing). The other 4 columns (id, link_id,
+    // is_anonymous, is_boosted_like) were pulled over the wire but never used.
+    .select("liker_id, receiver_id, created_at")
     .gte("created_at", startDateStr)
     .lte("created_at", endDateStr)
-    .or(`liker_id.eq.${userId},receiver_id.eq.${userId}`);
+    .or(`liker_id.eq.${effectiveUserId},receiver_id.eq.${effectiveUserId}`);
 
   if (error || !userLikes) {
     return {
@@ -78,10 +95,10 @@ export async function getWeeklyLikeStats(userId: string) {
     const statItem = stats.find(s => s.date === likeDateStr);
 
     if (statItem) {
-      if (like.liker_id === userId) {
+      if (like.liker_id === effectiveUserId) {
         statItem.given += 1;
       }
-      if (like.receiver_id === userId) {
+      if (like.receiver_id === effectiveUserId) {
         statItem.taken += 1;
       }
     }

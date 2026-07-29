@@ -16,7 +16,7 @@ const FLUSH_INTERVAL_MS = 800;
 // the app to every open feed tab regardless of relevance, which was a
 // significant Supabase egress cost that scaled with likes × concurrent
 // viewers rather than with actual relevance).
-const REVALIDATE_INTERVAL_MS = 120_000;
+const REVALIDATE_INTERVAL_MS = 300_000; // 5 min — likes_count is cosmetic; realtime stats are live
 // Cap background prefetch / revalidate pages. Unbounded pagination was
 // hammering /api/feed (offset 0→400+) and saturating the Supabase path.
 const MAX_PREFETCH_PAGES = 1; // SSR page + 1 more ≈ 100 links

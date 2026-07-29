@@ -4,7 +4,7 @@ import { revalidatePath } from "next/cache";
 import { supabase } from "@/lib/supabase";
 import { supabaseAdmin } from "@/lib/supabase/admin";
 import { requireStaff } from "@/lib/auth";
-import { getUserLinks, getUserStats, getReferralStats, failIfElite } from "@/lib/admin";
+import { getUserLinks, getUserStats, getReferralStats, failIfElite, nextBoostOrder } from "@/lib/admin";
 import { TIME_PRESET_DAYS, type FeatureModel, type TimePreset } from "@/lib/types";
 import { logAudit } from "@/lib/audit";
 
@@ -212,7 +212,7 @@ export async function activateBoost(args: ActivateArgs): Promise<AdminActionResu
     await failIfElite(args.userId);
     const payload = computePayload("boost", args);
 
-    const nextOrder = await getNextBoostOrder();
+    const nextOrder = await nextBoostOrder();
 
     const { error } = await supabase
       .from("profiles")
@@ -234,35 +234,6 @@ export async function activateBoost(args: ActivateArgs): Promise<AdminActionResu
     console.error("activateBoost error:", err);
     return { error: err instanceof Error ? err.message : "Failed to activate boost" };
   }
-}
-
-// Returns the next `boost_order` value to assign to a newly-boosted profile.
-// Backed by a dedicated Postgres sequence (`public.boost_order_seq`, see
-// supabase/migrations/0004_phase2_hardening.sql) via the `next_boost_order()`
-// RPC, so concurrent activations can't collide the way a plain
-// "select max() then update elsewhere" pair could (two admins activating a
-// boost at the same moment could previously both read the same MAX and
-// write the same boost_order). `nextval()` is atomic at the DB level with no
-// extra locking needed.
-async function getNextBoostOrder(): Promise<number> {
-  const { data, error } = await supabase.rpc("next_boost_order");
-  if (!error && typeof data === "number") {
-    return data;
-  }
-
-  // Fallback for environments where migration 0004 hasn't been applied yet
-  // (e.g. local/staging drift) — keeps boost activation working, just
-  // without the stronger atomicity guarantee.
-  console.error("next_boost_order RPC unavailable, falling back to max+1:", error);
-  const { data: rows } = await supabase
-    .from("profiles")
-    .select("boost_order")
-    .eq("is_boosted", true)
-    .order("boost_order", { ascending: false })
-    .limit(1);
-
-  if (!rows || rows.length === 0) return 1;
-  return (rows[0] as any).boost_order + 1;
 }
 
 export async function deactivateBoost(userId: string): Promise<AdminActionResult> {

@@ -49,6 +49,23 @@ export async function middleware(request: NextRequest) {
     },
   });
 
+  // ── Ad-network-friendly security headers ────────────────────────────
+  // "origin" tells the browser to send just the origin (not the full path)
+  // as the Referer header when loading cross-origin resources like ad
+  // iframes. This is the right balance — ad networks can verify the
+  // publisher domain without leaking internal page paths.
+  response.headers.set("Referrer-Policy", "origin");
+
+  // ── Security headers (defense-in-depth) ──────────────────────────────
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  response.headers.set("X-Frame-Options", "SAMEORIGIN");
+  response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
+  response.headers.set("X-XSS-Protection", "0");
+  // Permissions-Policy: restrict sensitive browser features by default.
+  // The embed-frame proxy overrides this for ad iframes specifically.
+  response.headers.set("Permissions-Policy",
+    "camera=(), microphone=(), geolocation=(), interest-cohort=()");
+
   const supabase = createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
     // Keep this in sync with `createSupabaseServerClient()`
     // (@/lib/supabase/server.ts): without an explicit `httpOnly`/`secure`,
