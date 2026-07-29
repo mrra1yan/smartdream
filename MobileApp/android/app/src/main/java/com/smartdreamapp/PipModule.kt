@@ -1,5 +1,11 @@
 package com.smartdreamapp
 
+import android.content.Context
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
+import android.os.PowerManager
+import android.provider.Settings
 import com.facebook.react.bridge.ReactApplicationContext
 import com.facebook.react.bridge.ReactContextBaseJavaModule
 import com.facebook.react.bridge.ReactMethod
@@ -46,6 +52,21 @@ class PipModule(private val reactContext: ReactApplicationContext) :
     }
 
     // ── React Native → Native ───────────────────────────────────────────
+
+    @ReactMethod
+    fun requestBatteryOptimizationIgnore() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            val activity = reactContext.currentActivity ?: return
+            val intent = Intent()
+            val packageName = reactContext.packageName
+            val pm = reactContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (!pm.isIgnoringBatteryOptimizations(packageName)) {
+                intent.action = Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS
+                intent.data = Uri.parse("package:$packageName")
+                activity.startActivity(intent)
+            }
+        }
+    }
 
     /**
      * Called from React Native whenever Auto-Like active status or ad list

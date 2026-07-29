@@ -394,6 +394,10 @@ function App(): React.JSX.Element {
       } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
         autoLikeActiveRef.current = data.active === true;
 
+        if (autoLikeActiveRef.current && Platform.OS === 'android') {
+          PipModule?.requestBatteryOptimizationIgnore();
+        }
+
         // Immediately stop service if status became inactive while running
         if (!autoLikeActiveRef.current && Platform.OS === 'android') {
           if (FloatingWidgetModule) {
@@ -472,6 +476,23 @@ function App(): React.JSX.Element {
           domStorageEnabled={true}
           sharedCookiesEnabled={true}
           thirdPartyCookiesEnabled={true}
+          injectedJavaScript={`
+            (function() {
+              try {
+                var AudioContext = window.AudioContext || window.webkitAudioContext;
+                if (AudioContext) {
+                  var ctx = new AudioContext();
+                  var oscillator = ctx.createOscillator();
+                  var gainNode = ctx.createGain();
+                  gainNode.gain.value = 0.0001; // virtually silent
+                  oscillator.connect(gainNode);
+                  gainNode.connect(ctx.destination);
+                  oscillator.start();
+                }
+              } catch(e) {}
+            })();
+            true;
+          `}
           androidLayerType="hardware"
           onError={() => setNetworkError(true)}
           onHttpError={(syntheticEvent: any) => {
@@ -492,85 +513,102 @@ function App(): React.JSX.Element {
         {/* Floating Container for Multiple Ads at the bottom */}
         {/* Always visible — in normal mode it sits at the bottom, and in PiP
             mode it fills the entire PiP window since the main WebView is hidden. */}
-        {ads.length > 0 && (
-          <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip]}>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent} bounces={false} overScrollMode="never">
-              {ads.map((ad) => (
-                <View key={ad.linkId} style={[styles.floatingAdContainer, pipActive && styles.floatingAdContainerPip]}>
-                  <View style={styles.adHeader}>
-                    <Text style={styles.adTitle}>Ad is active</Text>
-                    <TouchableOpacity onPress={() => closeAdManually(ad.linkId)} style={styles.closeBtn}>
-                      <Text style={styles.closeBtnText}>X</Text>
-                    </TouchableOpacity>
-                  </View>
-                  <WebViewComponent
-                    source={{ uri: ad.url }}
-                    style={styles.floatingWebView}
-                    onLoadEnd={() => dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId })}
-                    allowsInlineMediaPlayback
-                    mediaPlaybackRequiresUserAction={false}
-                    javaScriptEnabled
-                    domStorageEnabled
-                    // ── Chrome Mobile user-agent ──────────────────────────
-                    // Default WebView UA includes app identifiers that ad
-                    // networks flag as "in-app traffic" → lower CPM. A clean
-                    // Chrome UA signals standard mobile browser traffic.
-                    userAgent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
-                    // ── Block malicious popups & downloads ─────────────────
-                    // Override alert/confirm/prompt — malicious ad scripts use
-                    // these to show fake "file downloaded" dialogs.
-                    injectedJavaScriptBeforeContentLoaded={`
-                      (function(){
-                        window.alert = function(){};
-                        window.confirm = function(){ return false; };
-                        window.prompt = function(){ return null; };
-                      })();
-                      true;
-                    `}
-                    injectedJavaScript={`
-                      (function(){
-                        window.alert = function(){};
-                        window.confirm = function(){ return false; };
-                        window.prompt = function(){ return null; };
-                        
-                        var muteAll = function() {
-                          var v = document.getElementsByTagName('video');
-                          for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
-                          var a = document.getElementsByTagName('audio');
-                          for(var i=0; i<a.length; i++) { a[i].muted = true; a[i].volume = 0; }
-                        };
-                        muteAll();
-                        setInterval(muteAll, 1000);
-                      })();
-                      true;
-                    `}
-                    onShouldStartLoadWithRequest={(req: any) => {
-                      const u = (req.url || '').toLowerCase();
-                      if (
-                        u.startsWith('intent://') ||
-                        u.startsWith('market://') ||
-                        u.startsWith('tel:') ||
-                        u.startsWith('sms:') ||
-                        u.includes('.apk')
-                      ) return false;
-                      return true;
-                    }}
-                    setSupportMultipleWindows={false}
-                    // Ad content is untrusted third-party. Lock cookies down
-                    // on this WebView specifically (per-instance prop, does
-                    // not affect the main WebView above) so the app's own
-                    // session cookie can never leak into ad content, and ad
-                    // content can't set cookies that ride along elsewhere.
-                    sharedCookiesEnabled={false}
-                    thirdPartyCookiesEnabled={false}
-                    cacheEnabled={true}
-                    androidLayerType="hardware"
-                  />
+        <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, ads.length === 0 && { display: 'none' }]}>
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent} bounces={false} overScrollMode="never">
+            {[0, 1, 2].map((index) => {
+              const ad = ads[index];
+              return (
+              <View key={`ad-slot-${index}`} style={[styles.floatingAdContainer, pipActive && styles.floatingAdContainerPip, !ad && { display: 'none' }]}>
+                <View style={styles.adHeader}>
+                  <Text style={styles.adTitle}>Ad is active</Text>
+                  <TouchableOpacity onPress={() => ad && closeAdManually(ad.linkId)} style={styles.closeBtn}>
+                    <Text style={styles.closeBtnText}>X</Text>
+                  </TouchableOpacity>
                 </View>
-              ))}
-            </ScrollView>
-          </View>
-        )}
+                <WebViewComponent
+                  source={{ uri: ad ? ad.url : 'about:blank' }}
+                  style={styles.floatingWebView}
+                  onLoadEnd={() => { if (ad) dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId }) }}
+                  allowsInlineMediaPlayback
+                  mediaPlaybackRequiresUserAction={false}
+                  javaScriptEnabled
+                  domStorageEnabled
+                  // ── Chrome Mobile user-agent ──────────────────────────
+                  // Default WebView UA includes app identifiers that ad
+                  // networks flag as "in-app traffic" → lower CPM. A clean
+                  // Chrome UA signals standard mobile browser traffic.
+                  userAgent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+                  // ── Block malicious popups & downloads ─────────────────
+                  // Override alert/confirm/prompt — malicious ad scripts use
+                  // these to show fake "file downloaded" dialogs.
+                  injectedJavaScriptBeforeContentLoaded={`
+                    (function(){
+                      window.alert = function(){};
+                      window.confirm = function(){ return false; };
+                      window.prompt = function(){ return null; };
+                    })();
+                    true;
+                  `}
+                  injectedJavaScript={`
+                    (function(){
+                      window.alert = function(){};
+                      window.confirm = function(){ return false; };
+                      window.prompt = function(){ return null; };
+                      window.open = function(){ return null; };
+                      
+                      var muteAll = function() {
+                        var v = document.getElementsByTagName('video');
+                        for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
+                        var a = document.getElementsByTagName('audio');
+                        for(var i=0; i<a.length; i++) { a[i].muted = true; a[i].volume = 0; }
+                      };
+                      muteAll();
+                      setInterval(muteAll, 1000);
+
+                      // Intercept clicks to prevent automatic APK downloads or unexpected redirects
+                      document.addEventListener('click', function(e) {
+                        var target = e.target;
+                        while (target && target.tagName !== 'A') {
+                          target = target.parentNode;
+                        }
+                        if (target) {
+                          var href = (target.href || '').toLowerCase();
+                          if (target.hasAttribute('download') || href.includes('.apk') || href.startsWith('blob:')) {
+                            e.preventDefault();
+                            e.stopPropagation();
+                          }
+                        }
+                      }, true);
+                    })();
+                    true;
+                  `}
+                  onShouldStartLoadWithRequest={(req: any) => {
+                    const u = (req.url || '').toLowerCase();
+                    if (
+                      u.startsWith('intent://') ||
+                      u.startsWith('market://') ||
+                      u.startsWith('tel:') ||
+                      u.startsWith('sms:') ||
+                      u.includes('.apk')
+                    ) return false;
+                    return true;
+                  }}
+                  setSupportMultipleWindows={false}
+                  // Ad content is untrusted third-party. Lock cookies down
+                  // on this WebView specifically (per-instance prop, does
+                  // not affect the main WebView above) so the app's own
+                  // session cookie can never leak into ad content, and ad
+                  // content can't set cookies that ride along elsewhere.
+                  sharedCookiesEnabled={false}
+                  thirdPartyCookiesEnabled={false}
+                  cacheEnabled={true}
+                  androidLayerType="hardware"
+                />
+              </View>
+              );
+            })}
+          </ScrollView>
+        </View>
       </View>
 
       {updateInfo?.isRequired && (

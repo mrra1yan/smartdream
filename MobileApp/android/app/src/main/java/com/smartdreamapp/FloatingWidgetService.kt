@@ -200,8 +200,16 @@ class FloatingWidgetService : Service() {
             setPadding(0, dpToPx(1), 0, dpToPx(1))
             layoutParams = android.widget.FrameLayout.LayoutParams(
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
+            )
+        }
+
+        val webViewScroll = android.widget.ScrollView(this).apply {
+            layoutParams = android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
                 android.widget.FrameLayout.LayoutParams.MATCH_PARENT
             )
+            addView(webViewContainer)
         }
 
         // Transparent overlay to intercept touches for dragging/clicking the entire widget body
@@ -214,7 +222,7 @@ class FloatingWidgetService : Service() {
             isFocusable = true
         }
 
-        webViewWrapper.addView(webViewContainer)
+        webViewWrapper.addView(webViewScroll)
         webViewWrapper.addView(touchOverlay)
 
         mainContainer.addView(header)
@@ -393,6 +401,20 @@ class FloatingWidgetService : Service() {
                                         window.alert = function(){};
                                         window.confirm = function(){ return false; };
                                         window.prompt = function(){ return null; };
+                                        window.open = function(){ return null; };
+                                        document.addEventListener('click', function(e) {
+                                            var target = e.target;
+                                            while (target && target.tagName !== 'A') {
+                                                target = target.parentNode;
+                                            }
+                                            if (target) {
+                                                var href = (target.href || '').toLowerCase();
+                                                if (target.hasAttribute('download') || href.indexOf('.apk') > -1 || href.indexOf('blob:') === 0) {
+                                                    e.preventDefault();
+                                                    e.stopPropagation();
+                                                }
+                                            }
+                                        }, true);
                                     })();
                                 """.trimIndent(), null)
                             }
@@ -437,10 +459,24 @@ class FloatingWidgetService : Service() {
                             };
                             muteAll();
                             setInterval(muteAll, 1000);
-                            // Kill malicious popup dialogs
+                            // Kill malicious popup dialogs and auto-downloads
                             window.alert = function(){};
                             window.confirm = function(){ return false; };
                             window.prompt = function(){ return null; };
+                            window.open = function(){ return null; };
+                            document.addEventListener('click', function(e) {
+                                var target = e.target;
+                                while (target && target.tagName !== 'A') {
+                                    target = target.parentNode;
+                                }
+                                if (target) {
+                                    var href = (target.href || '').toLowerCase();
+                                    if (target.hasAttribute('download') || href.indexOf('.apk') > -1 || href.indexOf('blob:') === 0) {
+                                        e.preventDefault();
+                                        e.stopPropagation();
+                                    }
+                                }
+                            }, true);
                         })();
                     """.trimIndent(), null)
                 }
@@ -564,7 +600,7 @@ class FloatingWidgetService : Service() {
             e.printStackTrace()
         }
 
-        return START_STICKY
+        return START_NOT_STICKY
     }
 
     override fun onDestroy() {
