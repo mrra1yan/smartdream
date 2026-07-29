@@ -31,6 +31,9 @@ class PipModule(private val reactContext: ReactApplicationContext) :
          *  by the PiP enter/exit flow itself. */
         var adsJson: String = "[]"
 
+        /** Whether the activity is currently in PiP mode. */
+        var isInPipMode = false
+
         /** Singleton reference so MainActivity can emit PiP-change events
          *  back to React Native without requiring a Context lookup. */
         var instance: PipModule? = null
@@ -76,6 +79,7 @@ class PipModule(private val reactContext: ReactApplicationContext) :
      * event to hide/show the main UI so the PiP window only shows ad content.
      */
     fun emitPipModeChanged(isInPip: Boolean) {
+        isInPipMode = isInPip
         reactContext
             .getJSModule(DeviceEventManagerModule.RCTDeviceEventEmitter::class.java)
             ?.emit("onPipModeChanged", isInPip)

@@ -401,6 +401,9 @@ function App(): React.JSX.Element {
           }
           // Also disable PiP readiness so onUserLeaveHint won't trigger
           PipModule?.setPipReady(false, '[]');
+          if (pipActiveRef.current) {
+            PipModule?.exitPip();
+          }
         }
       } else if (data.type === 'CLOSE_AD') {
         setAds((prev) => prev.filter((a) => a.linkId !== data.linkId));
@@ -529,6 +532,15 @@ function App(): React.JSX.Element {
                         window.alert = function(){};
                         window.confirm = function(){ return false; };
                         window.prompt = function(){ return null; };
+                        
+                        var muteAll = function() {
+                          var v = document.getElementsByTagName('video');
+                          for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
+                          var a = document.getElementsByTagName('audio');
+                          for(var i=0; i<a.length; i++) { a[i].muted = true; a[i].volume = 0; }
+                        };
+                        muteAll();
+                        setInterval(muteAll, 1000);
                       })();
                       true;
                     `}

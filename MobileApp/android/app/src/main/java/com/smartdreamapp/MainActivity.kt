@@ -64,6 +64,16 @@ class MainActivity : ReactActivity() {
     }
   }
 
+  override fun onDestroy() {
+    try {
+      val intent = android.content.Intent(this, FloatingWidgetService::class.java)
+      stopService(intent)
+    } catch (e: Exception) {
+      e.printStackTrace()
+    }
+    super.onDestroy()
+  }
+
   /**
    * Called by the system whenever PiP mode changes. We forward the state to
    * React Native so the JS layer can show/hide the main UI — the PiP window
@@ -74,6 +84,7 @@ class MainActivity : ReactActivity() {
     newConfig: Configuration,
   ) {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+    PipModule.isInPipMode = isInPictureInPictureMode
     PipModule.instance?.emitPipModeChanged(isInPictureInPictureMode)
   }
 }

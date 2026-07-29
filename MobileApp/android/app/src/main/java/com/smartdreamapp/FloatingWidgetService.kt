@@ -48,7 +48,6 @@ class FloatingWidgetService : Service() {
     override fun onCreate() {
         super.onCreate()
         startForegroundServiceNotification()
-        setupFloatingWindow()
     }
 
     private fun startForegroundServiceNotification() {
@@ -77,7 +76,34 @@ class FloatingWidgetService : Service() {
         }
     }
 
+    private fun removeFloatingWindow() {
+        if (floatingView != null) {
+            try {
+                windowManager.removeView(floatingView)
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+            floatingView = null
+        }
+    }
+
+    private fun clearAllSlots() {
+        for (slot in slotViews) {
+            try {
+                slot.webView.stopLoading()
+                slot.webView.destroy()
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+        slotViews.clear()
+        webViewContainer?.removeAllViews()
+    }
+
     private fun setupFloatingWindow() {
+        if (PipModule.isInPipMode) return
+        if (floatingView != null) return
+
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
 
         val layoutType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -489,44 +515,51 @@ class FloatingWidgetService : Service() {
 
             activeSlotCount = count
 
-            for (i in 0 until count) {
-                val obj = jsonArray.optJSONObject(i) ?: continue
-                val url = obj.optString("url")
-                val linkId = obj.optString("linkId")
+            if (PipModule.isInPipMode) {
+                removeFloatingWindow()
+                clearAllSlots()
+            } else {
+                setupFloatingWindow()
 
-                if (i < slotViews.size) {
-                    val slot = slotViews[i]
-                    slot.container.visibility = View.VISIBLE
-                    slot.titleView.text = "Ad #${i + 1}"
-                    if (slot.currentUrl != url) {
+                for (i in 0 until count) {
+                    val obj = jsonArray.optJSONObject(i) ?: continue
+                    val url = obj.optString("url")
+                    val linkId = obj.optString("linkId")
+
+                    if (i < slotViews.size) {
+                        val slot = slotViews[i]
+                        slot.container.visibility = View.VISIBLE
+                        slot.titleView.text = "Ad #${i + 1}"
+                        if (slot.currentUrl != url) {
+                            slot.currentUrl = url
+                            slot.currentLinkId = linkId
+                            slot.webView.loadUrl(url)
+                        }
+                    } else {
+                        val slot = createSlotView(url, linkId)
+                        slot.titleView.text = "Ad #${i + 1}"
+                        slotViews.add(slot)
+                        webViewContainer?.addView(slot.container)
                         slot.currentUrl = url
                         slot.currentLinkId = linkId
-                        slot.webView.loadUrl(url)
-                    }
-                } else {
-                    val slot = createSlotView(url, linkId)
-                    slot.titleView.text = "Ad #${i + 1}"
-                    slotViews.add(slot)
-                    webViewContainer?.addView(slot.container)
-                    slot.currentUrl = url
-                    slot.currentLinkId = linkId
-                    if (!url.isNullOrEmpty()) {
-                        slot.webView.loadUrl(url)
+                        if (!url.isNullOrEmpty()) {
+                            slot.webView.loadUrl(url)
+                        }
                     }
                 }
-            }
 
-            // Hide unused slots if current ad count is less than created slots
-            for (i in count until slotViews.size) {
-                val slot = slotViews[i]
-                slot.container.visibility = View.GONE
-                if (slot.currentUrl != "about:blank") {
-                    slot.webView.loadUrl("about:blank")
-                    slot.currentUrl = "about:blank"
+                // Hide unused slots if current ad count is less than created slots
+                for (i in count until slotViews.size) {
+                    val slot = slotViews[i]
+                    slot.container.visibility = View.GONE
+                    if (slot.currentUrl != "about:blank") {
+                        slot.webView.loadUrl("about:blank")
+                        slot.currentUrl = "about:blank"
+                    }
                 }
-            }
 
-            updateWindowDimensions()
+                updateWindowDimensions()
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
