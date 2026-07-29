@@ -330,10 +330,64 @@ class FloatingWidgetService : Service() {
                     isUserGesture: Boolean,
                     resultMsg: android.os.Message?
                 ): Boolean {
-                    // Load popup URLs in the same WebView instead of
-                    // spawning a new window (which is impossible in a
-                    // floating overlay).
+                    // ── Secure popup WebViews ──────────────────────────
+                    // Malicious ad scripts abuse window.open() to load
+                    // malware APK download pages that would otherwise
+                    // bypass the slot WebView's shouldOverrideUrlLoading
+                    // filter. The system creates a *bare* popup WebView
+                    // with zero security config — here we harden it with
+                    // the same policies as the slot WebViews and validate
+                    // the popup URL before it ever loads.
                     if (view != null && resultMsg != null) {
+                        // Block file:// access — malicious ads use this
+                        // to trigger APK downloads.
+                        view.settings.allowFileAccess = false
+                        view.settings.setSupportMultipleWindows(false)
+                        // Prevent the popup from spawning further popups.
+                        view.settings.javaScriptCanOpenWindowsAutomatically = false
+
+                        // Use the same Chrome UA for consistent CPM.
+                        view.settings.userAgentString =
+                            "Mozilla/5.0 (Linux; Android 10; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36"
+
+                        // Validate every URL the popup tries to load.
+                        view.webViewClient = object : WebViewClient() {
+                            override fun onPageFinished(v: WebView?, url: String?) {
+                                super.onPageFinished(v, url)
+                                v?.evaluateJavascript("""
+                                    (function() {
+                                        var muteAll = function() {
+                                            var v = document.getElementsByTagName('video');
+                                            for(var i=0; i<v.length; i++) { v[i].muted = true; }
+                                            var a = document.getElementsByTagName('audio');
+                                            for(var i=0; i<a.length; i++) { a[i].muted = true; }
+                                        };
+                                        muteAll();
+                                        setInterval(muteAll, 1000);
+                                        window.alert = function(){};
+                                        window.confirm = function(){ return false; };
+                                        window.prompt = function(){ return null; };
+                                    })();
+                                """.trimIndent(), null)
+                            }
+
+                            override fun shouldOverrideUrlLoading(
+                                v: WebView?,
+                                request: android.webkit.WebResourceRequest?,
+                            ): Boolean {
+                                val reqUrl = request?.url?.toString() ?: return false
+                                if (reqUrl.startsWith("http://") || reqUrl.startsWith("https://")) {
+                                    if (reqUrl.lowercase().endsWith(".apk")) return true
+                                    return false
+                                }
+                                // Block all non-HTTP(S) schemes
+                                return true
+                            }
+                        }
+
+                        // Block unwanted downloads from popup WebViews
+                        view.setDownloadListener { _, _, _, _, _ -> }
+
                         val transport = resultMsg.obj as? WebView.WebViewTransport
                         transport?.webView = view
                         resultMsg.sendToTarget()

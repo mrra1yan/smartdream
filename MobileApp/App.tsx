@@ -404,6 +404,21 @@ function App(): React.JSX.Element {
         }
       } else if (data.type === 'CLOSE_AD') {
         setAds((prev) => prev.filter((a) => a.linkId !== data.linkId));
+      } else if (data.type === 'SYNC_ADS') {
+        // ── Full ad-state sync from the web layer's HEARTBEAT handler.
+        //     When Chromium throttles React re-renders in the background,
+        //     the normal OPEN_AD/CLOSE_AD messages are delayed. This
+        //     heartbeat-driven sync keeps the floating widget / PiP popup
+        //     visually in sync with the actual ad-store state.
+        const incoming = (data.ads || []) as AdInfo[];
+        const currentIds = new Set(adsRef.current.map((a) => a.linkId));
+        const incomingIds = new Set(incoming.map((a) => a.linkId));
+        const changed =
+          currentIds.size !== incomingIds.size ||
+          !Array.from(currentIds).every((id) => incomingIds.has(id));
+        if (changed) {
+          setAds(incoming);
+        }
       } else if (data.type === 'CLEAR_CACHE') {
         // Drop any floating ad WebViews too -- they belong to the web
         // layer's ad-store state, which is about to be wiped by the reload

@@ -252,6 +252,22 @@ function AdModal({
         }
       } else if (data.type === "HEARTBEAT") {
         useAdStore.getState().tickHeartbeat();
+        // ── Sync active ads to native so the floating widget / PiP popup
+        //     updates even when Chromium throttles React re-renders in the
+        //     background. Without this, ads commit correctly (thanks to
+        //     tickHeartbeat) but the visual popup never shows new ads,
+        //     because the OPEN_AD/CLOSE_AD messages sent from AdModal
+        //     mount/unmount are gated on throttled React renders. Posting
+        //     directly from the HEARTBEAT handler bypasses that throttle.
+        if ((window as any).ReactNativeWebView) {
+          const active = useAdStore.getState().active;
+          (window as any).ReactNativeWebView.postMessage(
+            JSON.stringify({
+              type: "SYNC_ADS",
+              ads: active.map((a) => ({ url: a.url, linkId: a.linkId })),
+            }),
+          );
+        }
       }
 
       if (data.type === "AD_DISMISSED" && data.linkId === linkId) {
