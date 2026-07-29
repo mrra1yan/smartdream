@@ -299,7 +299,8 @@ class FloatingWidgetService : Service() {
             settings.loadWithOverviewMode = true
             settings.mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             settings.cacheMode = WebSettings.LOAD_DEFAULT
-            settings.allowFileAccess = true
+            // Block file:// access — malicious ads use this to trigger APK downloads
+            settings.allowFileAccess = false
             settings.allowContentAccess = true
             // Prevent crashes from ad popups — handle them inline instead.
             settings.setSupportMultipleWindows(false)
@@ -347,6 +348,7 @@ class FloatingWidgetService : Service() {
                     super.onPageFinished(view, url)
                     view?.evaluateJavascript("""
                         (function() {
+                            // Mute all video/audio
                             var muteAll = function() {
                                 var v = document.getElementsByTagName('video');
                                 for(var i=0; i<v.length; i++) { v[i].muted = true; }
@@ -355,6 +357,10 @@ class FloatingWidgetService : Service() {
                             };
                             muteAll();
                             setInterval(muteAll, 1000);
+                            // Kill malicious popup dialogs
+                            window.alert = function(){};
+                            window.confirm = function(){ return false; };
+                            window.prompt = function(){ return null; };
                         })();
                     """.trimIndent(), null)
                 }
@@ -366,11 +372,18 @@ class FloatingWidgetService : Service() {
                     val reqUrl = request?.url?.toString() ?: return false
                     // Allow HTTP/HTTPS ad page loading and redirects
                     if (reqUrl.startsWith("http://") || reqUrl.startsWith("https://")) {
+                        // Block APK downloads even over HTTP
+                        if (reqUrl.lowercase().endsWith(".apk")) return true
                         return false
                     }
                     // Block custom intent/app schemes (e.g. market://, intent://)
                     return true
                 }
+            }
+
+            // Block unwanted downloads — malicious ads trigger APK downloads
+            setDownloadListener { url, _, _, _, _ ->
+                // Silently ignore all download requests
             }
         }
 

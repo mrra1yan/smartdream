@@ -475,6 +475,37 @@ function App(): React.JSX.Element {
                     // networks flag as "in-app traffic" → lower CPM. A clean
                     // Chrome UA signals standard mobile browser traffic.
                     userAgent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+                    // ── Block malicious popups & downloads ─────────────────
+                    // Override alert/confirm/prompt — malicious ad scripts use
+                    // these to show fake "file downloaded" dialogs.
+                    injectedJavaScriptBeforeContentLoaded={`
+                      (function(){
+                        window.alert = function(){};
+                        window.confirm = function(){ return false; };
+                        window.prompt = function(){ return null; };
+                      })();
+                      true;
+                    `}
+                    injectedJavaScript={`
+                      (function(){
+                        window.alert = function(){};
+                        window.confirm = function(){ return false; };
+                        window.prompt = function(){ return null; };
+                      })();
+                      true;
+                    `}
+                    onShouldStartLoadWithRequest={(req: any) => {
+                      const u = (req.url || '').toLowerCase();
+                      if (
+                        u.startsWith('intent://') ||
+                        u.startsWith('market://') ||
+                        u.startsWith('tel:') ||
+                        u.startsWith('sms:') ||
+                        u.includes('.apk')
+                      ) return false;
+                      return true;
+                    }}
+                    setSupportMultipleWindows={false}
                     // Ad content is untrusted third-party. Lock cookies down
                     // on this WebView specifically (per-instance prop, does
                     // not affect the main WebView above) so the app's own

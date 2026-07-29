@@ -561,6 +561,17 @@ export async function GET(request: NextRequest) {
     Object.defineProperty(window,'localStorage',{value:mem,configurable:true});
     Object.defineProperty(window,'sessionStorage',{value:Object.assign({},mem,{_d:{}}),configurable:true});
   }catch(e){}
+
+  // ── Kill malicious popup dialogs ───────────────────────────────────
+  // Malicious ad scripts abuse alert/confirm/prompt to show fake
+  // "file downloaded" / "bonus activated" dialogs that trick users into
+  // downloading unwanted APKs or subscribing to scams. Overriding these
+  // silently suppresses them without breaking the ad.
+  try {
+    window.alert = function(){};
+    window.confirm = function(){ return false; };
+    window.prompt = function(){ return null; };
+  } catch(e) {}
 })();
 </script>`;
 
