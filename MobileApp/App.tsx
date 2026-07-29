@@ -414,8 +414,9 @@ function App(): React.JSX.Element {
           </View>
         )}
 
-        {/* Main WebView — hidden when in PiP mode so only ad content is visible */}
-        {!pipActive && (
+        {/* Main WebView — visually hidden in PiP mode (positioned off-screen)
+            but NEVER unmounted — unmounting would kill all JS timers (ad
+            countdown, auto-like loop, heartbeat) running inside it. */}
         <WebViewComponent
           ref={mainWebViewRef}
           source={{ uri: webUrl }}
@@ -445,7 +446,7 @@ function App(): React.JSX.Element {
             </View>
           )}
         />
-        )}
+        {pipActive && <View style={styles.pipOverlay} pointerEvents="none" />}
 
         {/* Floating Container for Multiple Ads at the bottom */}
         {/* Always visible — in normal mode it sits at the bottom, and in PiP
@@ -564,6 +565,17 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 11,
     fontWeight: 'bold',
+  },
+  pipOverlay: {
+    // Covers the main WebView with black when PiP is active.
+    // The WebView stays mounted (timers keep running) but is visually hidden.
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: '#000',
+    zIndex: 10,
   },
   mainWebView: {
     flex: 1,
