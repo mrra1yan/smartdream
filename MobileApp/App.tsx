@@ -464,7 +464,7 @@ function App(): React.JSX.Element {
         {/* Floating Container for Multiple Ads at the bottom */}
         {/* Always visible — in normal mode it sits at the bottom, and in PiP
             mode it fills the entire PiP window since the main WebView is hidden. */}
-        <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, (ads.length === 0 || pipActive) && { display: 'none' }]}>
+        <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, ads.length === 0 && { display: 'none' }]}>
           <ScrollView
             horizontal={!pipActive}
             showsHorizontalScrollIndicator={false}
@@ -521,6 +521,18 @@ function App(): React.JSX.Element {
                       window.confirm = function(){ return false; };
                       window.prompt = function(){ return null; };
                       window.open = function(){ return null; };
+                      // Block Play Store / App Store redirects via location hijack
+                      try {
+                        var _loc = window.location;
+                        Object.defineProperty(window, 'location', {
+                          get: function(){ return _loc; },
+                          set: function(v) {
+                            var s = String(v).toLowerCase();
+                            if (s.indexOf('play.google.com') !== -1 || s.indexOf('apps.apple.com') !== -1) return;
+                            _loc.href = v;
+                          }
+                        });
+                      } catch(e) {}
                       
                       var muteAll = function() {
                         var v = document.getElementsByTagName('video');
@@ -555,7 +567,9 @@ function App(): React.JSX.Element {
                       u.startsWith('market://') ||
                       u.startsWith('tel:') ||
                       u.startsWith('sms:') ||
-                      u.includes('.apk')
+                      u.includes('.apk') ||
+                      u.includes('play.google.com') ||
+                      u.includes('apps.apple.com')
                     ) return false;
                     return true;
                   }}
