@@ -1,4 +1,4 @@
-import React, { useRef, useState, useEffect } from 'react';
+import React, { useRef, useState, useEffect, useCallback } from 'react';
 import {
   SafeAreaView,
   StatusBar,
@@ -15,6 +15,7 @@ import {
   AppState,
 } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import NetInfo from '@react-native-community/netinfo';
 
 const WebViewComponent = WebView as any;
 
@@ -92,6 +93,10 @@ function generateSessionNonce(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
+// Maximum consecutive WebView error retries before showing the error modal.
+// Prevents infinite reload loops when the server is genuinely down.
+const MAX_ERROR_RETRIES = 3;
+
 function App(): React.JSX.Element {
   const mainWebViewRef = useRef<WebView>(null);
   const [ads, setAds] = useState<AdInfo[]>([]);
@@ -99,6 +104,7 @@ function App(): React.JSX.Element {
   const [webUrl, setWebUrl] = useState<string>(DEFAULT_WEB_URL);
   const [configError, setConfigError] = useState<boolean>(false);
   const [networkError, setNetworkError] = useState<boolean>(false);
+  const retryCountRef = useRef<number>(0);
 
   // One nonce per app session, shared with the web layer via BRIDGE_INIT and
   // echoed on every subsequent native->web message so the web layer can
@@ -172,12 +178,37 @@ function App(): React.JSX.Element {
     // ── Track app state for HEARTBEAT throttling ──────────────────────
     // The HEARTBEAT interval only fires when the app is backgrounded so
     // we don't waste CPU pinging the WebView while the user is active.
-    const subscription = AppState.addEventListener('change', (nextAppState) => {
+    const appStateSub = AppState.addEventListener('change', (nextAppState) => {
       appStateRef.current = nextAppState;
     });
 
+    // ── Proactive network monitoring ──────────────────────────────────
+    // Auto-show the error when the device genuinely goes offline, and
+    // auto-recover (dismiss error + reload) when connectivity returns.
+    // Replaces the old "user must tap Retry" flow for network recovery.
+    const netInfoSub = NetInfo.addEventListener((state) => {
+      if (!state.isConnected) {
+        setNetworkError(true);
+      } else {
+        // Network returned — auto-recover if the error modal is showing
+        setNetworkError((prev) => {
+          if (prev) {
+            // Network just came back while error was showing — reload
+            retryCountRef.current = 0;
+            setTimeout(() => {
+              if (mainWebViewRef.current) {
+                mainWebViewRef.current.reload();
+              }
+            }, 500);
+          }
+          return false;
+        });
+      }
+    });
+
     return () => {
-      subscription.remove();
+      appStateSub.remove();
+      netInfoSub();
     };
   }, []);
 
@@ -215,11 +246,40 @@ function App(): React.JSX.Element {
 
   const handleRetry = async () => {
     setNetworkError(false);
+    retryCountRef.current = 0;
     await fetchConfig();
     if (mainWebViewRef.current) {
       mainWebViewRef.current.reload();
     }
   };
+
+  // ── Connectivity-gated error handler ──────────────────────────────────
+  // Instead of blindly showing the error modal on any WebView error, check
+  // if the device actually has internet. If connected, auto-retry with
+  // exponential backoff. Only show the error after MAX_ERROR_RETRIES or
+  // when the device is genuinely offline.
+  const handleWebViewError = useCallback(async () => {
+    const state = await NetInfo.fetch();
+    if (!state.isConnected) {
+      // Device is genuinely offline → show error immediately
+      setNetworkError(true);
+      return;
+    }
+    // Device is connected — this was a transient error (Vercel cold start,
+    // SSL hiccup, 502, etc.). Auto-retry with backoff.
+    retryCountRef.current++;
+    if (retryCountRef.current >= MAX_ERROR_RETRIES) {
+      // Too many consecutive failures even with connectivity — give up
+      setNetworkError(true);
+      return;
+    }
+    const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 8000);
+    setTimeout(() => {
+      if (mainWebViewRef.current) {
+        mainWebViewRef.current.reload();
+      }
+    }, delay);
+  }, []);
 
   // Builds a `window.dispatchEvent(new MessageEvent(...))` call and runs it
   // in the main WebView via injectJavaScript. `payload` is JSON.stringify'd
@@ -342,7 +402,14 @@ function App(): React.JSX.Element {
           source={{ uri: webUrl }}
           style={styles.mainWebView}
           onMessage={onMainMessage}
-          onLoadEnd={() => dispatchToWeb({ type: 'BRIDGE_INIT' })}
+          onLoadEnd={() => {
+            // Successful load → clear any prior error state and reset
+            // the retry counter so transient blips don't accumulate
+            // across unrelated load cycles.
+            setNetworkError(false);
+            retryCountRef.current = 0;
+            dispatchToWeb({ type: 'BRIDGE_INIT' });
+          }}
           allowsInlineMediaPlayback
           mediaPlaybackRequiresUserAction={false}
           startInLoadingState={true}
@@ -377,11 +444,11 @@ function App(): React.JSX.Element {
             if (!url) return true;
             return isAllowedHost(url, ALLOWED_WEB_HOSTS) || url.startsWith('about:');
           }}
-          onError={() => setNetworkError(true)}
+          onError={() => handleWebViewError()}
           onHttpError={(syntheticEvent: any) => {
             const { nativeEvent } = syntheticEvent;
             if (nativeEvent.statusCode >= 500) {
-              setNetworkError(true);
+              handleWebViewError();
             }
           }}
           renderLoading={() => (

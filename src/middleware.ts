@@ -9,6 +9,59 @@ import {
 } from "@/lib/routes";
 
 /**
+ * Fast, zero-network session extraction from the Supabase auth cookie.
+ * Decodes the JWT payload directly — no token refresh, no HTTP calls.
+ *
+ * Used as a fallback when `getSession()` times out (token refresh is slow
+ * from this edge region). The role/status claims in an expired JWT are still
+ * valid for route-guard decisions — only the *signature* is stale, which
+ * middleware never verifies anyway (the real auth boundary is RLS + getUser
+ * in server components/route handlers).
+ */
+function getSessionFromCookie(request: NextRequest): SessionClaims | null {
+  const cookies = request.cookies.getAll();
+
+  // @supabase/ssr stores the session in chunked cookies:
+  //   sb-<ref>-auth-token.0, sb-<ref>-auth-token.1, ...
+  // or a single sb-<ref>-auth-token for small payloads.
+  const authCookies = cookies
+    .filter((c) => c.name.match(/^sb-.*-auth-token/))
+    .sort((a, b) => a.name.localeCompare(b.name));
+
+  if (authCookies.length === 0) return null;
+
+  const fullValue = authCookies.map((c) => c.value).join("");
+
+  try {
+    const session = JSON.parse(fullValue);
+    const accessToken: string | undefined = session?.access_token;
+    if (!accessToken) return null;
+
+    // Decode the JWT payload (base64url → JSON). No signature verification
+    // needed — see docstring above.
+    const parts = accessToken.split(".");
+    if (parts.length !== 3) return null;
+
+    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(
+      base64.length + ((4 - (base64.length % 4)) % 4),
+      "=",
+    );
+    const payload = JSON.parse(atob(padded));
+
+    const sub: string | undefined = payload.sub;
+    if (!sub) return null;
+
+    const role = (payload.user_metadata?.role as string) ?? "user";
+    const status = (payload.user_metadata?.status as string) ?? "pending";
+
+    return { sub, role, status };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Edge middleware.
  *
  * Two responsibilities:
@@ -92,21 +145,37 @@ export async function middleware(request: NextRequest) {
     },
   });
 
-  // Reads the session from the cookie and decodes the JWT locally (no
-  // network call).  Using getSession() instead of getUser() avoids
-  // MIDDLEWARE_INVOCATION_TIMEOUT on Vercel's Edge Runtime when the
-  // Supabase auth server is slow.  Token refresh still happens inside
-  // server components via createSupabaseServerClient().
-  const {
-    data: { session: supabaseSession },
-  } = await supabase.auth.getSession();
-  const user = supabaseSession?.user ?? null;
-
-  const role = (user?.user_metadata?.role as string | undefined) ?? null;
-  const status = (user?.user_metadata?.status as string | undefined) ?? null;
-  const session: SessionClaims | null = user
-    ? { sub: user.id, role: role ?? "user", status: status ?? "pending" }
-    : null;
+  // ── Session extraction with timeout safety net ─────────────────────
+  // `getSession()` usually resolves instantly (local JWT decode) but may
+  // trigger a network call to Supabase Auth to refresh an expired access
+  // token. That refresh can exceed Vercel's Edge middleware timeout
+  // (1.5 s hobby / 5 s pro) when the auth server is slow from this edge
+  // region — causing a 504 MIDDLEWARE_INVOCATION_TIMEOUT.
+  //
+  // Strategy: race getSession() against an 800 ms deadline. On timeout,
+  // fall back to zero-network JWT decode from the cookie — the expired
+  // token's role/status claims are still valid for route guards. The
+  // actual token refresh is deferred to the next fast request or to
+  // route handlers / server actions (which have longer timeouts).
+  let session: SessionClaims | null = null;
+  try {
+    const { data: { session: supabaseSession } } = await Promise.race([
+      supabase.auth.getSession(),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("getSession timeout")), 800),
+      ),
+    ]);
+    const user = supabaseSession?.user ?? null;
+    if (user) {
+      const role = (user.user_metadata?.role as string | undefined) ?? null;
+      const status = (user.user_metadata?.status as string | undefined) ?? null;
+      session = { sub: user.id, role: role ?? "user", status: status ?? "pending" };
+    }
+  } catch {
+    // getSession() timed out — Supabase Auth is slow from this edge.
+    // Fall back to direct JWT decode for route guards.
+    session = getSessionFromCookie(request);
+  }
 
   const pathname = request.nextUrl.pathname;
   const isAuthPath = AUTH_PATHS.some((p) => pathname === p);
