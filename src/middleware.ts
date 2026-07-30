@@ -92,11 +92,15 @@ export async function middleware(request: NextRequest) {
     },
   });
 
-  // Refreshes the session cookie if the access token was near expiry and
-  // writes the refreshed value back to `response` via setAll above.
+  // Reads the session from the cookie and decodes the JWT locally (no
+  // network call).  Using getSession() instead of getUser() avoids
+  // MIDDLEWARE_INVOCATION_TIMEOUT on Vercel's Edge Runtime when the
+  // Supabase auth server is slow.  Token refresh still happens inside
+  // server components via createSupabaseServerClient().
   const {
-    data: { user },
-  } = await supabase.auth.getUser();
+    data: { session },
+  } = await supabase.auth.getSession();
+  const user = session?.user ?? null;
 
   const role = (user?.user_metadata?.role as string | undefined) ?? null;
   const status = (user?.user_metadata?.status as string | undefined) ?? null;
