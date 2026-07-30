@@ -28,12 +28,6 @@ const AD_LOAD_FALLBACK_MS = 3000;
  */
 let nativeBridgeNonce: string | null = null;
 
-/** Whether the native app is currently in PiP mode. When true, ads render
- *  as browser-style iframe overlays inside the main WebView instead of
- *  delegating to separate native WebViews (which require unreliable SYNC_ADS
- *  message passing during PiP). */
-let pipMode = false;
-
 function parseNativeMessage(event: { data: unknown }): any {
   try {
     let data = event.data;
@@ -60,7 +54,6 @@ export function AdContainer() {
   const setAdBlockerDetected = useAdStore((s) => s.setAdBlockerDetected);
   const [mounted, setMounted] = useState(false);
   const [isNativeApp, setIsNativeApp] = useState(false);
-  const [, setPipModeRender] = useState(false); // trigger re-render on PiP change
 
   useEffect(() => {
     setMounted(true);
@@ -72,30 +65,19 @@ export function AdContainer() {
   // native sends it, independent of whether any ad is currently open.
   useEffect(() => {
     const handleBridgeInit = (event: any) => {
+      // ── Origin check ────────────────────────────────────────────────
+      // In browsers, reject cross-origin postMessages.  In the native
+      // WebView, injected events have origin="" (created via new
+      // MessageEvent) — those are allowed and rely on the nonce for auth.
+      if (event.origin && event.origin !== window.location.origin) return;
       const data = parseNativeMessage(event);
       if (data && data.type === "BRIDGE_INIT" && typeof data.nonce === "string" && data.nonce) {
         nativeBridgeNonce = data.nonce;
       }
-      // ── PiP mode toggle ──────────────────────────────────────────────
-      // When the native app enters/exits PiP, switch ad rendering strategy:
-      // PiP ON  → render ads as browser-style iframe overlays (same JS context)
-      // PiP OFF → delegate to native WebViews (normal mode)
-      if (data && data.type === "PIP_MODE") {
-        const active = data.active === true;
-        pipMode = active;
-        setPipModeRender(active); // trigger React re-render
-        if (active) {
-          document.body.classList.add("pip-mode");
-        } else {
-          document.body.classList.remove("pip-mode");
-        }
-      }
     };
     window.addEventListener("message", handleBridgeInit);
-    (document as any).addEventListener("message", handleBridgeInit);
     return () => {
       window.removeEventListener("message", handleBridgeInit);
-      (document as any).removeEventListener("message", handleBridgeInit);
     };
   }, []);
 
@@ -124,7 +106,7 @@ export function AdContainer() {
         </div>
       )}
 
-      {active.length > 0 && isNativeApp && !pipMode && (
+      {active.length > 0 && isNativeApp && (
         <>
           {active.map((ad, i) => (
             <AdModal
@@ -138,7 +120,7 @@ export function AdContainer() {
         </>
       )}
 
-      {active.length > 0 && (!isNativeApp || pipMode) && (
+      {active.length > 0 && !isNativeApp && (
         <div className="fixed inset-x-0 bottom-4 sm:bottom-6 z-50 flex flex-col items-center justify-end p-2 sm:p-4 pointer-events-none">
           <div className={`relative z-10 grid w-full max-w-[220px] sm:max-w-[260px] gap-2 pointer-events-auto ${active.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
             {active.map((ad, i) => (
@@ -237,7 +219,7 @@ function AdModal({
   // a grace period, same as the desktop path which never waits for
   // load confirmation at all.
   useEffect(() => {
-    if (!isNativeApp || pipMode || startedAt !== 0) return;
+    if (!isNativeApp || startedAt !== 0) return;
     const fallback = setTimeout(() => {
       markLoaded(linkId);
     }, AD_LOAD_FALLBACK_MS);
@@ -261,26 +243,23 @@ function AdModal({
   // Listen for messages from React Native app
   useEffect(() => {
     const handleNativeMessage = (event: any) => {
+      // ── Origin check ────────────────────────────────────────────────
+      if (event.origin && event.origin !== window.location.origin) return;
       const data = parseNativeMessage(event);
       if (!data) return;
 
       if (data.type === "AD_DISMISSED" || data.type === "AD_LOADED") {
-        if (data.nonce && typeof data.nonce === "string") {
-          if (!nativeBridgeNonce) {
-            nativeBridgeNonce = data.nonce;
-          } else if (data.nonce !== nativeBridgeNonce) {
-            return;
-          }
-        }
+        // ── Strict nonce enforcement ──────────────────────────────────
+        // Only accept AD_LOADED / AD_DISMISSED if the nonce matches
+        // the already-established nativeBridgeNonce (set exclusively by
+        // BRIDGE_INIT).  Previously the FIRST ad-message with any nonce
+        // would blindly overwrite a null nativeBridgeNonce — this let
+        // any page script forge an AD_LOADED and defeat the handshake.
+        if (!nativeBridgeNonce) return;          // BRIDGE_INIT hasn't arrived yet
+        if (!data.nonce || typeof data.nonce !== "string") return;
+        if (data.nonce !== nativeBridgeNonce) return;
       } else if (data.type === "HEARTBEAT") {
         useAdStore.getState().tickHeartbeat();
-        // ── Sync active ads to native so the PiP popup updates even when
-        //     Chromium throttles React re-renders in the background. Without
-        //     this, ads commit correctly (thanks to tickHeartbeat) but the
-        //     visual popup never shows new ads, because the OPEN_AD/CLOSE_AD
-        //     messages sent from AdModal mount/unmount are gated on throttled
-        //     React renders. Posting directly from the HEARTBEAT handler
-        //     bypasses that throttle.
         if ((window as any).ReactNativeWebView) {
           const active = useAdStore.getState().active;
           (window as any).ReactNativeWebView.postMessage(
@@ -301,15 +280,13 @@ function AdModal({
       }
     };
     window.addEventListener("message", handleNativeMessage);
-    (document as any).addEventListener("message", handleNativeMessage);
     
     return () => {
       window.removeEventListener("message", handleNativeMessage);
-      (document as any).removeEventListener("message", handleNativeMessage);
     };
   }, [linkId, startedAt, dismiss, markLoaded]);
 
-  if (isNativeApp && !pipMode) {
+  if (isNativeApp) {
     return null;
   }
 

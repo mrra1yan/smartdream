@@ -13,12 +13,8 @@ import {
   Linking,
   BackHandler,
   AppState,
-  NativeModules,
-  NativeEventEmitter,
 } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
-
-const { PipModule, KeepAliveModule } = NativeModules;
 
 const WebViewComponent = WebView as any;
 
@@ -102,7 +98,6 @@ function App(): React.JSX.Element {
   const [webUrl, setWebUrl] = useState<string>(DEFAULT_WEB_URL);
   const [configError, setConfigError] = useState<boolean>(false);
   const [networkError, setNetworkError] = useState<boolean>(false);
-  const [pipActive, setPipActive] = useState<boolean>(false);
 
   // One nonce per app session, shared with the web layer via BRIDGE_INIT and
   // echoed on every subsequent native->web message so the web layer can
@@ -117,6 +112,7 @@ function App(): React.JSX.Element {
     try {
       // added cache buster to prevent cached config
       const res = await fetch(`${CONFIG_URL}?t=${Date.now()}`);
+      if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`);
       const data = await res.json();
 
       // String compare versions. If API version doesn't match and forceUpdate is true, block app
@@ -148,24 +144,12 @@ function App(): React.JSX.Element {
   };
 
   const adsRef = useRef<AdInfo[]>([]);
-  adsRef.current = ads;
   const appStateRef = useRef<string>(AppState.currentState);
   const autoLikeActiveRef = useRef<boolean>(false);
-  const pipActiveRef = useRef<boolean>(false);
 
-  // ── Keep PipModule.pipReady in sync with current state ─────────────
-  // Must be called whenever auto-like status OR ads change so
-  // MainActivity.onUserLeaveHint() always sees the correct flag.
-  function syncPipReady() {
-    if (Platform.OS !== 'android' || !PipModule) return;
-    const should =
-      autoLikeActiveRef.current &&
-      (adsRef.current.length > 0 || pipActiveRef.current);
-    PipModule.setPipReady(
-      should,
-      should ? JSON.stringify(adsRef.current) : '[]',
-    );
-  }
+  // Keep adsRef in sync — done in an effect, not render body, to avoid
+  // stale-ref bugs under React concurrent rendering.
+  useEffect(() => { adsRef.current = ads; }, [ads]);
 
   // ── Route native ad WebView requests through the embed-frame proxy ─
   // The proxy (src/app/api/embed-frame) strips X-Frame-Options / CSP,
@@ -184,91 +168,21 @@ function App(): React.JSX.Element {
   useEffect(() => {
     fetchConfig();
 
-    // ── PiP mode change listener ─────────────────────────────────────
-    // MainActivity.onPictureInPictureModeChanged() emits this event.
-    // When PiP is active we hide the main WebView so only ad content is
-    // visible in the floating PiP window.
-    let pipEventSubscription: any = null;
-    if (Platform.OS === 'android' && PipModule) {
-      try {
-        const pipEmitter = new NativeEventEmitter(PipModule);
-        pipEventSubscription = pipEmitter.addListener('onPipModeChanged', (event: boolean) => {
-          setPipActive(event);
-          pipActiveRef.current = event;
-          // ── Tell the main WebView to switch to PiP display mode ──────
-          // Instead of managing separate ad WebViews (unreliable SYNC_ADS),
-          // the main WebView renders ads directly in its own JS context.
-          dispatchToWeb({ type: 'PIP_MODE', active: event });
-          if (event) {
-            KeepAliveModule?.start();
-          } else {
-            KeepAliveModule?.stop();
-          }
-        });
-      } catch (_) {
-        // PipModule not available on this device/OS version.
-      }
-    }
-
+    // ── Track app state for HEARTBEAT throttling ──────────────────────
+    // The HEARTBEAT interval only fires when the app is backgrounded so
+    // we don't waste CPU pinging the WebView while the user is active.
     const subscription = AppState.addEventListener('change', (nextAppState) => {
       appStateRef.current = nextAppState;
-      if (Platform.OS === 'android') {
-        const hasAds = adsRef.current.length > 0 && autoLikeActiveRef.current;
-
-        if (nextAppState === 'background' || nextAppState === 'inactive') {
-          // ── PiP path (Android 8+, zero permission needed) ──────────
-          // PipModule.setPipReady(true) tells MainActivity.onUserLeaveHint()
-          // to call enterPictureInPictureMode() on the next Home press.
-          if (PipModule && hasAds) {
-            PipModule.setPipReady(true, JSON.stringify(adsRef.current));
-          }
-          // ── Pre-start keep-alive service before PiP enters ─────────
-          // When PiP hasn't activated yet but the app is backgrounded
-          // with auto-like running, start the service immediately so
-          // timers don't get throttled during the transition.
-          if (autoLikeActiveRef.current) {
-            KeepAliveModule?.start();
-          }
-        } else if (nextAppState === 'active') {
-          // ── Coming back to foreground ─────────────────────────────
-          // Recalculate pipReady — don't unconditionally reset to false.
-          // If auto-like is still active with ads, pipReady should stay
-          // true so the next Home press enters PiP again.
-          syncPipReady();
-          setPipActive(false);
-          pipActiveRef.current = false;
-          // Stop keep-alive service — foreground doesn't need it.
-          KeepAliveModule?.stop();
-        }
-      }
     });
 
     return () => {
       subscription.remove();
-      if (pipEventSubscription) {
-        pipEventSubscription.remove();
-      }
     };
   }, []);
 
   useEffect(() => {
-    if (Platform.OS === 'android') {
-      // ── Keep PipModule in sync with current ad state ─────────────
-      syncPipReady();
-
-      // ── Auto-exit PiP when ads run out ──────────────────────────
-      // If PiP is active but no ads remain (all completed/dismissed),
-      // exit PiP so the user doesn't see a blank black PiP window.
-      if (pipActiveRef.current && ads.length === 0) {
-        PipModule?.exitPip();
-      }
-    }
-  }, [ads]);
-
-  useEffect(() => {
-    // Keep WebView timers alive in the background
-    // When the app has an active Foreground Service (PiP), the RN JS thread
-    // stays awake. By pinging the WebView every second, we force Chromium
+    // Keep WebView timers alive in the background.
+    // By pinging the WebView every second, we force Chromium
     // to process its JS task queue, bypassing the 1-minute background timer
     // throttling that would otherwise break the Auto-Like 9-second intervals.
     const interval = setInterval(() => {
@@ -372,39 +286,28 @@ function App(): React.JSX.Element {
         });
       } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
         autoLikeActiveRef.current = data.active === true;
-
-        // ── Keep pipReady in sync whenever auto-like toggles ─────────
-        // Previously pipReady was only updated in useEffect([ads]),
-        // which doesn't fire when ONLY auto-like status changes — so
-        // PiP could be permanently disabled if the user toggles
-        // auto-like without any ad list changes.
-        syncPipReady();
-
-        // When auto-like becomes inactive while PiP is running,
-        // exit PiP mode so the user isn't stuck in a blank PiP window.
-        if (!autoLikeActiveRef.current && Platform.OS === 'android') {
-          PipModule?.setPipReady(false, '[]');
-          KeepAliveModule?.stop();
-          if (pipActiveRef.current) {
-            PipModule?.exitPip();
-          }
-        }
       } else if (data.type === 'CLOSE_AD') {
         setAds((prev) => prev.filter((a) => a.linkId !== data.linkId));
       } else if (data.type === 'SYNC_ADS') {
         // ── Full ad-state sync from the web layer's HEARTBEAT handler.
         //     When Chromium throttles React re-renders in the background,
         //     the normal OPEN_AD/CLOSE_AD messages are delayed. This
-        //     heartbeat-driven sync keeps the floating widget / PiP popup
+        //     heartbeat-driven sync keeps the ad container
         //     visually in sync with the actual ad-store state.
         const incoming = (data.ads || []) as AdInfo[];
+        // Validate each ad object has required string fields before
+        // trusting the array — prevents undefined propagation into
+        // closeAdManually / getProxiedAdUrl if a malformed ad slips through.
+        const valid = incoming.filter(
+          (a: any) => typeof a?.linkId === 'string' && typeof a?.url === 'string',
+        );
         const currentIds = new Set(adsRef.current.map((a) => a.linkId));
-        const incomingIds = new Set(incoming.map((a) => a.linkId));
+        const incomingIds = new Set(valid.map((a) => a.linkId));
         const changed =
           currentIds.size !== incomingIds.size ||
           !Array.from(currentIds).every((id) => incomingIds.has(id));
         if (changed) {
-          setAds(incoming);
+          setAds(valid);
         }
       } else if (data.type === 'CLEAR_CACHE') {
         // Drop any floating ad WebViews too -- they belong to the web
@@ -430,18 +333,9 @@ function App(): React.JSX.Element {
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#000" />
-      <View style={[styles.innerContainer, { paddingTop: Platform.OS === 'android' ? StatusBar.currentHeight : 0 }]}>
+      <View style={[styles.innerContainer, { paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 0 }]}>
 
-        {/* ── PiP indicator banner (shown at top when PiP is active) ── */}
-        {pipActive && (
-          <View style={styles.pipBanner}>
-            <Text style={styles.pipBannerText}>⚡ Auto-Like running · Tap PiP to return</Text>
-          </View>
-        )}
-
-        {/* Main WebView — visually hidden in PiP mode (positioned off-screen)
-            but NEVER unmounted — unmounting would kill all JS timers (ad
-            countdown, auto-like loop, heartbeat) running inside it. */}
+        {/* Main WebView */}
         <WebViewComponent
           ref={mainWebViewRef}
           source={{ uri: webUrl }}
@@ -474,6 +368,14 @@ function App(): React.JSX.Element {
             true;
           `}
           androidLayerType="hardware"
+          onShouldStartLoadWithRequest={(req: any) => {
+            // Only allow the trusted web host — blocks redirects to
+            // external domains that could steal session cookies
+            // (sharedCookiesEnabled=true on this WebView).
+            const url = req.url;
+            if (!url) return true;
+            return isAllowedHost(url, ALLOWED_WEB_HOSTS) || url.startsWith('about:');
+          }}
           onError={() => setNetworkError(true)}
           onHttpError={(syntheticEvent: any) => {
             const { nativeEvent } = syntheticEvent;
@@ -490,30 +392,20 @@ function App(): React.JSX.Element {
         />
 
         {/* Floating Container for Multiple Ads at the bottom */}
-        {/* Always visible — in normal mode it sits at the bottom, and in PiP
-            mode it fills the entire PiP window since the main WebView is hidden. */}
-        {/* Floating Container for Multiple Ads at the bottom */}
-        {/* Always visible — in normal mode it sits at the bottom, and in PiP
-            mode it fills the entire PiP window since the main WebView is hidden. */}
-        <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, ads.length === 0 && { display: 'none' }]}>
+        <View style={[styles.adsWrapper, ads.length === 0 && { display: 'none' }]}>
           <ScrollView
-            horizontal={!pipActive}
+            horizontal
             showsHorizontalScrollIndicator={false}
-            contentContainerStyle={pipActive ? styles.scrollContentPip : styles.scrollContent}
+            contentContainerStyle={styles.scrollContent}
             bounces={false}
             overScrollMode="never"
           >
             {[0, 1, 2].map((index) => {
-              // Assign stable slot indices: ads are mapped to fixed slots 0,1,2
-              // by their position in the array. This is deterministic and doesn't
-              // mutate ad objects during render (no render-phase side effect).
               const ad = ads[index] || null;
 
               return (
               <View key={`ad-slot-${index}`} style={[
                 styles.floatingAdContainer, 
-                pipActive && styles.floatingAdContainerPip,
-                pipActive && { position: 'relative', top: undefined, left: undefined, right: undefined, bottom: undefined }, // PiP: stack vertically instead of absolute overlap
                 !ad && { display: 'none' }
               ]}>
                 <View style={styles.adHeader}>
@@ -556,23 +448,41 @@ function App(): React.JSX.Element {
                   `}
                   injectedJavaScript={`
                     (function(){
+                      // ── Disable dialogs ──────────────────────────────────
                       window.alert = function(){};
                       window.confirm = function(){ return false; };
                       window.prompt = function(){ return null; };
+                      // ── Block popups ────────────────────────────────────
                       window.open = function(){ return null; };
-                      // Block Play Store / App Store redirects via location hijack
+                      
+                      // ── Block ALL external redirects via location ────────
+                      // Only same-origin navigations are allowed (proxy content).
+                      // Any attempt to redirect to an external domain is silently dropped.
                       try {
                         var _loc = window.location;
+                        var _origin = window.location.origin;
                         Object.defineProperty(window, 'location', {
                           get: function(){ return _loc; },
                           set: function(v) {
-                            var s = String(v).toLowerCase();
-                            if (s.indexOf('play.google.com') !== -1 || s.indexOf('apps.apple.com') !== -1) return;
-                            _loc.href = v;
+                            try {
+                              if (new URL(String(v), _loc.href).origin === _origin) {
+                                _loc.href = v;
+                              }
+                            } catch(_) { /* invalid URL — block */ }
                           }
                         });
+                        // Block .assign() and .replace() bypasses
+                        _loc.assign = function(){};
+                        _loc.replace = function(){};
                       } catch(e) {}
-                      
+
+                      // ── Block form submissions (hidden-form malware) ────
+                      document.addEventListener('submit', function(e) {
+                        e.preventDefault();
+                        e.stopPropagation();
+                      }, true);
+
+                      // ── Mute all audio/video ────────────────────────────
                       var muteAll = function() {
                         var v = document.getElementsByTagName('video');
                         for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
@@ -582,7 +492,7 @@ function App(): React.JSX.Element {
                       muteAll();
                       setInterval(muteAll, 1000);
 
-                      // Intercept clicks to prevent automatic APK downloads or unexpected redirects
+                      // ── Block APK downloads and blob: URLs ──────────────
                       document.addEventListener('click', function(e) {
                         var target = e.target;
                         while (target && target.tagName !== 'A') {
@@ -600,17 +510,17 @@ function App(): React.JSX.Element {
                     true;
                   `}
                   onShouldStartLoadWithRequest={(req: any) => {
-                    const u = (req.url || '').toLowerCase();
-                    if (
-                      u.startsWith('intent://') ||
-                      u.startsWith('market://') ||
-                      u.startsWith('tel:') ||
-                      u.startsWith('sms:') ||
-                      u.includes('.apk') ||
-                      u.includes('play.google.com') ||
-                      u.includes('apps.apple.com')
-                    ) return false;
-                    return true;
+                    // ── Strict navigation control ───────────────────────
+                    // Allow only our proxy domain (where /api/embed-frame lives).
+                    // Blocks: external http/https, intent://, market://, tel:, sms:, etc.
+                    const url = req.url;
+                    if (!url || url === 'about:blank') return true;
+                    try {
+                      const parsed = new URL(url);
+                      const base = new URL(webUrl);
+                      if (parsed.origin === base.origin) return true;
+                    } catch (_) {}
+                    return false;
                   }}
                   setSupportMultipleWindows={false}
                   // Ad content is untrusted third-party. Lock cookies down
@@ -694,29 +604,6 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: '#000',
   },
-  pipBanner: {
-    backgroundColor: '#a855f7',
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    alignItems: 'center',
-  },
-  pipBannerText: {
-    color: '#fff',
-    fontSize: 11,
-    fontWeight: 'bold',
-  },
-  pipOverlay: {
-    // Covers the main WebView with black when PiP is active.
-    // The WebView stays mounted (timers keep running) but is visually hidden.
-    // zIndex sits below adsWrapper so ad content remains visible in PiP.
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: '#000',
-    zIndex: 1,
-  },
   mainWebView: {
     flex: 1,
     backgroundColor: 'transparent',
@@ -747,24 +634,10 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     // Add extra padding at bottom for Android gesture bar
     paddingBottom: Platform.OS === 'android' ? 24 : 10,
-    zIndex: 20, // Above pipOverlay (zIndex:1) so ads are visible in PiP mode
-  },
-  adsWrapperPip: {
-    // In PiP mode, fill the entire window since main WebView is hidden
-    top: 0,
-    height: undefined as any,
-    flex: 1,
-    backgroundColor: '#000',
-    paddingVertical: 4,
-    paddingBottom: 4,
+    zIndex: 20,
   },
   scrollContent: {
     paddingHorizontal: 10,
-  },
-  scrollContentPip: {
-    paddingHorizontal: 4,
-    paddingVertical: 4,
-    gap: 4,
   },
   floatingAdContainer: {
     width: 110, // Reduced to half (was 220)
@@ -775,13 +648,6 @@ const styles = StyleSheet.create({
     borderColor: '#444',
     borderWidth: 1,
     marginRight: 10, // For spacing between items
-  },
-  floatingAdContainerPip: {
-    // In PiP mode, adapt to vertical stacking — each ad gets equal space
-    width: '100%' as any,
-    flex: 1,
-    minHeight: 80,
-    marginBottom: 4,
   },
   adHeader: {
     flexDirection: 'row',

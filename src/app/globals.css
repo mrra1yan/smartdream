@@ -191,36 +191,6 @@ aside {
   transition: filter 0.25s ease;
 }
 
-/* ── PiP Mode (Picture-in-Picture) ──────────────────────────────────────
-   When the native Android app enters PiP, the main WebView becomes the PiP
-   window. We hide all app chrome and show only the ad overlays (rendered
-   via React portal to <body>), so the PiP window displays clean ad content
-   that auto-cycles naturally via the existing React re-render loop. */
-
-body.pip-mode {
-  background: #000 !important;
-}
-
-body.pip-mode nav,
-body.pip-mode header,
-body.pip-mode aside,
-body.pip-mode main,
-body.pip-mode footer,
-body.pip-mode [role="navigation"],
-body.pip-mode [class*="sidebar"],
-body.pip-mode [class*="navbar"],
-body.pip-mode [class*="header-"],
-body.pip-mode [class*="bottombar"],
-body.pip-mode > div:not(:last-child) {
-  display: none !important;
-}
-
-/* Keep the portal-mounted ad overlays visible */
-body.pip-mode > [data-portal],
-body.pip-mode .fixed.inset-0.z-\[70\] {
-  display: flex !important;
-}
-
 
 
 

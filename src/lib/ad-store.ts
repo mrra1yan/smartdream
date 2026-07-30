@@ -233,9 +233,10 @@ export const useAdStore = create<AdStore>((set, get) => {
 
       // ── Fetch token in background ──────────────────────────────────
       (async () => {
-        const result = await startAdView(linkId, ad.source);
-        const current = get().active.find((a) => a.linkId === linkId);
-        if (!current) return; // dismissed while waiting
+        try {
+          const result = await startAdView(linkId, ad.source);
+          const current = get().active.find((a) => a.linkId === linkId);
+          if (!current) return; // dismissed while waiting
 
         if (!("token" in result)) {
           clearTimer(linkId);
@@ -277,6 +278,17 @@ export const useAdStore = create<AdStore>((set, get) => {
               }
             }, remaining),
           );
+        }
+        } catch (err) {
+          // ── startAdView failed (network error, server down, etc.) ──
+          // Don't leave this ad slot permanently blocked — dismiss it
+          // so the next queued ad can start.
+          console.error('[markLoaded] startAdView failed for linkId:', linkId, err);
+          clearTimer(linkId);
+          set((s) => ({
+            active: s.active.filter((a) => a.linkId !== linkId),
+          }));
+          get().startNext();
         }
       })();
     },

@@ -1,8 +1,5 @@
 package com.smartdreamapp
 
-import android.app.PictureInPictureParams
-import android.content.res.Configuration
-import android.os.Build
 import android.os.Bundle
 import android.view.WindowManager
 import com.facebook.react.ReactActivity
@@ -21,68 +18,8 @@ class MainActivity : ReactActivity() {
     window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
   }
 
-  /**
-   * Returns the name of the main component registered from JavaScript. This is used to schedule
-   * rendering of the component.
-   */
   override fun getMainComponentName(): String = "SmartDreamApp"
 
-  /**
-   * Returns the instance of the [ReactActivityDelegate]. We use [DefaultReactActivityDelegate]
-   * which allows you to enable New Architecture with a single boolean flags [fabricEnabled]
-   */
   override fun createReactActivityDelegate(): ReactActivityDelegate =
       DefaultReactActivityDelegate(this, mainComponentName, fabricEnabled)
-
-  // ── Native Picture-in-Picture (zero-permission floating window) ────────
-  //
-  // When the user presses Home while Auto-Like is active with ads, we enter
-  // Android's native PiP mode instead of fully backgrounding. Unlike the
-  // old SYSTEM_ALERT_WINDOW overlay approach, this requires NO runtime
-  // permission — just the manifest declaration supportsPictureInPicture.
-  //
-  // PipModule.setPipReady() must have been called from JS (with active=true
-  // + non-empty ads) BEFORE onUserLeaveHint fires, otherwise Home behaves
-  // normally (full background).
-
-  /**
-   * Called when the user presses Home (or triggers an activity-leave gesture).
-   * If [PipModule.pipReady] is true, we enter PiP mode so the activity
-   * continues running in a system-managed floating window.
-   */
-  override fun onUserLeaveHint() {
-    super.onUserLeaveHint()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-      if (PipModule.pipReady) {
-        try {
-          val params = PictureInPictureParams.Builder().build()
-          enterPictureInPictureMode(params)
-        } catch (e: Exception) {
-          // OEMs may reject PiP under certain conditions (e.g. device policy,
-          // low-RAM devices). Silently fall back to normal backgrounding.
-          e.printStackTrace()
-        }
-      } else {
-        android.util.Log.d("MainActivity", "onUserLeaveHint: pipReady is false, skipping PiP")
-      }
-    }
-  }
-
-  override fun onDestroy() {
-    super.onDestroy()
-  }
-
-  /**
-   * Called by the system whenever PiP mode changes. We forward the state to
-   * React Native so the JS layer can show/hide the main UI — the PiP window
-   * should only display ad content, not the full app chrome.
-   */
-  override fun onPictureInPictureModeChanged(
-    isInPictureInPictureMode: Boolean,
-    newConfig: Configuration,
-  ) {
-    super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
-    PipModule.isInPipMode = isInPictureInPictureMode
-    PipModule.instance?.emitPipModeChanged(isInPictureInPictureMode)
-  }
 }
