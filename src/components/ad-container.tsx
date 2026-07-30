@@ -28,9 +28,6 @@ const AD_LOAD_FALLBACK_MS = 3000;
  */
 let nativeBridgeNonce: string | null = null;
 
-/** Last SYNC_ADS payload sent to native — skip duplicate dispatches. */
-let lastSyncedAdsJson: string | null = null;
-
 function parseNativeMessage(event: { data: unknown }): any {
   try {
     let data = event.data;
@@ -257,18 +254,20 @@ function AdModal({
       } else if (data.type === "HEARTBEAT") {
         useAdStore.getState().tickHeartbeat();
         // ── Sync active ads to native so the PiP popup updates even when
-        //     Chromium throttles React re-renders in the background. Skip
-        //     duplicate dispatches — the payload only changes when an ad is
-        //     added or removed, not on every heartbeat tick.
+        //     Chromium throttles React re-renders in the background. Without
+        //     this, ads commit correctly (thanks to tickHeartbeat) but the
+        //     visual popup never shows new ads, because the OPEN_AD/CLOSE_AD
+        //     messages sent from AdModal mount/unmount are gated on throttled
+        //     React renders. Posting directly from the HEARTBEAT handler
+        //     bypasses that throttle.
         if ((window as any).ReactNativeWebView) {
           const active = useAdStore.getState().active;
-          const json = JSON.stringify(active.map((a) => ({ url: a.url, linkId: a.linkId })));
-          if (json !== lastSyncedAdsJson) {
-            lastSyncedAdsJson = json;
-            (window as any).ReactNativeWebView.postMessage(
-              JSON.stringify({ type: "SYNC_ADS", ads: JSON.parse(json) }),
-            );
-          }
+          (window as any).ReactNativeWebView.postMessage(
+            JSON.stringify({
+              type: "SYNC_ADS",
+              ads: active.map((a) => ({ url: a.url, linkId: a.linkId })),
+            }),
+          );
         }
       }
 
