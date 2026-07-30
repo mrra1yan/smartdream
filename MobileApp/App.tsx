@@ -33,6 +33,7 @@ const DEFAULT_DOWNLOAD_URL = 'https://github.com/nurulhudda247/SmartDream-Releas
 // next.config.ts's serverActions.allowedOrigins plus the hardcoded default
 // below.
 const ALLOWED_WEB_HOSTS = [
+  'smart-dream-admin.vercel.app',
   'smart-dream.vercel.app',
   'smart-dream.smartdream.workers.dev',
   'sd.raiyan.io',
