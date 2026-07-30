@@ -204,7 +204,13 @@ function App(): React.JSX.Element {
     // Auto-show the error when the device genuinely goes offline, and
     // auto-recover (dismiss error + reload) when connectivity returns.
     // Replaces the old "user must tap Retry" flow for network recovery.
+    let prevConnected: boolean | null = null;
     const netInfoSub = NetInfo.addEventListener((state) => {
+      // NetInfo can emit multiple events with the same or null status.
+      // We only react when there is an actual change in the connection state.
+      if (state.isConnected === prevConnected) return;
+      prevConnected = state.isConnected;
+
       if (state.isConnected === false) {
         setNetworkError(true);
       } else if (state.isConnected === true) {
