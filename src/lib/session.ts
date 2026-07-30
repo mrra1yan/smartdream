@@ -1,5 +1,7 @@
 import "server-only";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { cache } from "react";
+import { cookies } from "next/headers";
+import { getSessionFromCookie } from "@/lib/session-cookie";
 
 /**
  * Thin session shim over Supabase Auth.
@@ -9,9 +11,13 @@ import { createSupabaseServerClient } from "@/lib/supabase/server";
  * Supabase (`@supabase/ssr`), but several server modules (`autolike.ts`,
  * `stats.ts`) still call `getSession()` to resolve the current user id.
  *
- * This shim preserves that API by reading the Supabase session + the mirrored
- * `profiles` row. It performs one DB lookup, so prefer `getCurrentUser()` in
- * `auth.ts` (React-cached) when you need the full profile.
+ * This shim preserves that API by decoding the JWT directly from the
+ * Supabase auth cookie — zero network calls, sub-millisecond resolution.
+ * Token revocation / freshness is enforced by Supabase RLS on the
+ * downstream DB queries, not by this function.
+ *
+ * Wrapped in React's `cache()` so multiple calls within the same request
+ * (e.g. from `getCurrentUser()` + `getMyStats()`) share the same result.
  */
 
 export type SessionPayload = {
@@ -21,20 +27,14 @@ export type SessionPayload = {
 };
 
 /** Returns the active session payload, or null when there is no signed-in user. */
-export async function getSession(): Promise<SessionPayload | null> {
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
+export const getSession = cache(async (): Promise<SessionPayload | null> => {
+  const store = await cookies();
+  const claims = getSessionFromCookie(store.getAll());
+  if (!claims) return null;
 
-  if (!user) return null;
-
-  // role / status are mirrored into the user's metadata by the DB trigger
-  // (see supabase/migrations/0001_supabase_auth.sql). Fall back to a DB read
-  // if they are not present yet (e.g. users created before the trigger ran).
-  const role = (user.user_metadata?.role as SessionPayload["role"]) ?? "user";
-  const status =
-    (user.user_metadata?.status as SessionPayload["status"]) ?? "pending";
-
-  return { sub: user.id, role, status };
-}
+  return {
+    sub: claims.sub,
+    role: claims.role as SessionPayload["role"],
+    status: claims.status as SessionPayload["status"],
+  };
+});

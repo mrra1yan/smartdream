@@ -7,59 +7,7 @@ import {
   SUPER_ADMIN_PATHS,
   ROLE_HOME,
 } from "@/lib/routes";
-
-/**
- * Fast, zero-network session extraction from the Supabase auth cookie.
- * Decodes the JWT payload directly — no token refresh, no HTTP calls.
- *
- * Used as a fallback when `getSession()` times out (token refresh is slow
- * from this edge region). The role/status claims in an expired JWT are still
- * valid for route-guard decisions — only the *signature* is stale, which
- * middleware never verifies anyway (the real auth boundary is RLS + getUser
- * in server components/route handlers).
- */
-function getSessionFromCookie(request: NextRequest): SessionClaims | null {
-  const cookies = request.cookies.getAll();
-
-  // @supabase/ssr stores the session in chunked cookies:
-  //   sb-<ref>-auth-token.0, sb-<ref>-auth-token.1, ...
-  // or a single sb-<ref>-auth-token for small payloads.
-  const authCookies = cookies
-    .filter((c) => c.name.match(/^sb-.*-auth-token/))
-    .sort((a, b) => a.name.localeCompare(b.name));
-
-  if (authCookies.length === 0) return null;
-
-  const fullValue = authCookies.map((c) => c.value).join("");
-
-  try {
-    const session = JSON.parse(fullValue);
-    const accessToken: string | undefined = session?.access_token;
-    if (!accessToken) return null;
-
-    // Decode the JWT payload (base64url → JSON). No signature verification
-    // needed — see docstring above.
-    const parts = accessToken.split(".");
-    if (parts.length !== 3) return null;
-
-    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = base64.padEnd(
-      base64.length + ((4 - (base64.length % 4)) % 4),
-      "=",
-    );
-    const payload = JSON.parse(atob(padded));
-
-    const sub: string | undefined = payload.sub;
-    if (!sub) return null;
-
-    const role = (payload.user_metadata?.role as string) ?? "user";
-    const status = (payload.user_metadata?.status as string) ?? "pending";
-
-    return { sub, role, status };
-  } catch {
-    return null;
-  }
-}
+import { getSessionFromCookie, type SessionClaims } from "@/lib/session-cookie";
 
 /**
  * Edge middleware.
@@ -77,12 +25,6 @@ function getSessionFromCookie(request: NextRequest): SessionClaims | null {
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
 const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
-
-type SessionClaims = {
-  sub: string;
-  role: string;
-  status: string;
-};
 
 export async function middleware(request: NextRequest) {
   // Preserve the reverse-proxy header injection that the previous middleware
@@ -174,7 +116,7 @@ export async function middleware(request: NextRequest) {
   } catch {
     // getSession() timed out — Supabase Auth is slow from this edge.
     // Fall back to direct JWT decode for route guards.
-    session = getSessionFromCookie(request);
+    session = getSessionFromCookie(request.cookies.getAll());
   }
 
   const pathname = request.nextUrl.pathname;
