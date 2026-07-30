@@ -104,7 +104,20 @@ function App(): React.JSX.Element {
   const [webUrl, setWebUrl] = useState<string>(DEFAULT_WEB_URL);
   const [configError, setConfigError] = useState<boolean>(false);
   const [networkError, setNetworkError] = useState<boolean>(false);
+  const [webViewLoading, setWebViewLoading] = useState<boolean>(true);
   const retryCountRef = useRef<number>(0);
+
+  // ── Safety timeout for loading spinner ──────────────────────────────
+  // Guarantees the loading spinner disappears after 6 seconds even if
+  // slow dynamic third-party ad iframes/scripts keep loading in the background.
+  useEffect(() => {
+    if (webViewLoading) {
+      const timer = setTimeout(() => {
+        setWebViewLoading(false);
+      }, 6000);
+      return () => clearTimeout(timer);
+    }
+  }, [webViewLoading]);
 
   // One nonce per app session, shared with the web layer via BRIDGE_INIT and
   // echoed on every subsequent native->web message so the web layer can
@@ -195,6 +208,7 @@ function App(): React.JSX.Element {
           if (prev) {
             // Network just came back while error was showing — reload
             retryCountRef.current = 0;
+            setWebViewLoading(true);
             setTimeout(() => {
               if (mainWebViewRef.current) {
                 mainWebViewRef.current.reload();
@@ -246,6 +260,7 @@ function App(): React.JSX.Element {
 
   const handleRetry = async () => {
     setNetworkError(false);
+    setWebViewLoading(true);
     retryCountRef.current = 0;
     await fetchConfig();
     if (mainWebViewRef.current) {
@@ -276,6 +291,7 @@ function App(): React.JSX.Element {
     const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 8000);
     setTimeout(() => {
       if (mainWebViewRef.current) {
+        setWebViewLoading(true);
         mainWebViewRef.current.reload();
       }
     }, delay);
@@ -402,17 +418,26 @@ function App(): React.JSX.Element {
           source={{ uri: webUrl }}
           style={styles.mainWebView}
           onMessage={onMainMessage}
+          onLoadStart={() => setWebViewLoading(true)}
+          onLoad={() => setWebViewLoading(false)}
           onLoadEnd={() => {
             // Successful load → clear any prior error state and reset
             // the retry counter so transient blips don't accumulate
             // across unrelated load cycles.
+            setWebViewLoading(false);
             setNetworkError(false);
             retryCountRef.current = 0;
             dispatchToWeb({ type: 'BRIDGE_INIT' });
           }}
+          onLoadProgress={({ nativeEvent }: any) => {
+            // Hide spinner early when page is 75%+ loaded.
+            // Bypasses permanent spinner hangs caused by slow background scripts.
+            if (nativeEvent.progress > 0.75) {
+              setWebViewLoading(false);
+            }
+          }}
           allowsInlineMediaPlayback
           mediaPlaybackRequiresUserAction={false}
-          startInLoadingState={true}
           cacheEnabled={true}
           javaScriptEnabled={true}
           domStorageEnabled={true}
@@ -451,13 +476,15 @@ function App(): React.JSX.Element {
               handleWebViewError();
             }
           }}
-          renderLoading={() => (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color="#a855f7" />
-              <Text style={styles.loadingText}>Smart Dream...</Text>
-            </View>
-          )}
         />
+
+        {/* Custom Loading Overlay */}
+        {webViewLoading && (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color="#a855f7" />
+            <Text style={styles.loadingText}>Smart Dream...</Text>
+          </View>
+        )}
 
         {/* Floating Container for Multiple Ads at the bottom */}
         <View style={[styles.adsWrapper, ads.length === 0 && { display: 'none' }]}>
