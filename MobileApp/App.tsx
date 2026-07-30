@@ -167,12 +167,13 @@ function App(): React.JSX.Element {
         pipEventSubscription = pipEmitter.addListener('onPipModeChanged', (event: boolean) => {
           setPipActive(event);
           pipActiveRef.current = event;
+          // ── Tell the main WebView to switch to PiP display mode ──────
+          // Instead of managing separate ad WebViews (unreliable SYNC_ADS),
+          // the main WebView renders ads directly in its own JS context.
+          dispatchToWeb({ type: 'PIP_MODE', active: event });
           if (event) {
-            // PiP activated — start keep-alive service so Android doesn't
-            // throttle the WebView's JavaScript timers (ad countdowns).
             KeepAliveModule?.start();
           } else {
-            // PiP dismissed — stop the keep-alive service.
             KeepAliveModule?.stop();
           }
         });
@@ -456,7 +457,6 @@ function App(): React.JSX.Element {
             </View>
           )}
         />
-        {pipActive && <View style={styles.pipOverlay} pointerEvents="none" />}
 
         {/* Floating Container for Multiple Ads at the bottom */}
         {/* Always visible — in normal mode it sits at the bottom, and in PiP
@@ -464,7 +464,7 @@ function App(): React.JSX.Element {
         {/* Floating Container for Multiple Ads at the bottom */}
         {/* Always visible — in normal mode it sits at the bottom, and in PiP
             mode it fills the entire PiP window since the main WebView is hidden. */}
-        <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, ads.length === 0 && { display: 'none' }]}>
+        <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, (ads.length === 0 || pipActive) && { display: 'none' }]}>
           <ScrollView
             horizontal={!pipActive}
             showsHorizontalScrollIndicator={false}

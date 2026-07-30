@@ -28,6 +28,12 @@ const AD_LOAD_FALLBACK_MS = 3000;
  */
 let nativeBridgeNonce: string | null = null;
 
+/** Whether the native app is currently in PiP mode. When true, ads render
+ *  as browser-style iframe overlays inside the main WebView instead of
+ *  delegating to separate native WebViews (which require unreliable SYNC_ADS
+ *  message passing during PiP). */
+let pipMode = false;
+
 function parseNativeMessage(event: { data: unknown }): any {
   try {
     let data = event.data;
@@ -54,6 +60,7 @@ export function AdContainer() {
   const setAdBlockerDetected = useAdStore((s) => s.setAdBlockerDetected);
   const [mounted, setMounted] = useState(false);
   const [isNativeApp, setIsNativeApp] = useState(false);
+  const [, setPipModeRender] = useState(false); // trigger re-render on PiP change
 
   useEffect(() => {
     setMounted(true);
@@ -68,6 +75,20 @@ export function AdContainer() {
       const data = parseNativeMessage(event);
       if (data && data.type === "BRIDGE_INIT" && typeof data.nonce === "string" && data.nonce) {
         nativeBridgeNonce = data.nonce;
+      }
+      // ── PiP mode toggle ──────────────────────────────────────────────
+      // When the native app enters/exits PiP, switch ad rendering strategy:
+      // PiP ON  → render ads as browser-style iframe overlays (same JS context)
+      // PiP OFF → delegate to native WebViews (normal mode)
+      if (data && data.type === "PIP_MODE") {
+        const active = data.active === true;
+        pipMode = active;
+        setPipModeRender(active); // trigger React re-render
+        if (active) {
+          document.body.classList.add("pip-mode");
+        } else {
+          document.body.classList.remove("pip-mode");
+        }
       }
     };
     window.addEventListener("message", handleBridgeInit);
@@ -103,7 +124,7 @@ export function AdContainer() {
         </div>
       )}
 
-      {active.length > 0 && isNativeApp && (
+      {active.length > 0 && isNativeApp && !pipMode && (
         <>
           {active.map((ad, i) => (
             <AdModal
@@ -117,7 +138,7 @@ export function AdContainer() {
         </>
       )}
 
-      {active.length > 0 && !isNativeApp && (
+      {active.length > 0 && (!isNativeApp || pipMode) && (
         <div className="fixed inset-x-0 bottom-4 sm:bottom-6 z-50 flex flex-col items-center justify-end p-2 sm:p-4 pointer-events-none">
           <div className={`relative z-10 grid w-full max-w-[220px] sm:max-w-[260px] gap-2 pointer-events-auto ${active.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
             {active.map((ad, i) => (
@@ -216,7 +237,7 @@ function AdModal({
   // a grace period, same as the desktop path which never waits for
   // load confirmation at all.
   useEffect(() => {
-    if (!isNativeApp || startedAt !== 0) return;
+    if (!isNativeApp || pipMode || startedAt !== 0) return;
     const fallback = setTimeout(() => {
       markLoaded(linkId);
     }, AD_LOAD_FALLBACK_MS);
@@ -288,7 +309,7 @@ function AdModal({
     };
   }, [linkId, startedAt, dismiss, markLoaded]);
 
-  if (isNativeApp) {
+  if (isNativeApp && !pipMode) {
     return null;
   }
 
