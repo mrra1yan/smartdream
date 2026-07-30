@@ -28,6 +28,9 @@ const AD_LOAD_FALLBACK_MS = 3000;
  */
 let nativeBridgeNonce: string | null = null;
 
+/** Last SYNC_ADS payload sent to native — skip duplicate dispatches. */
+let lastSyncedAdsJson: string | null = null;
+
 function parseNativeMessage(event: { data: unknown }): any {
   try {
     let data = event.data;
@@ -180,10 +183,11 @@ function AdModal({
           linkId: linkId,
         })
       );
-      
-      if (startedAt === 0) {
-        markLoaded(linkId);
-      }
+      // Don't call markLoaded here — the native WebView's onLoadEnd will
+      // dispatch AD_LOADED which triggers markLoaded. A 3-second fallback
+      // timeout (registered below) catches the case where AD_LOADED never
+      // arrives. Calling markLoaded synchronously here creates a race where
+      // both this call and the AD_LOADED handler can fire markLoaded.
       return true;
     }
 
@@ -252,21 +256,19 @@ function AdModal({
         }
       } else if (data.type === "HEARTBEAT") {
         useAdStore.getState().tickHeartbeat();
-        // ── Sync active ads to native so the floating widget / PiP popup
-        //     updates even when Chromium throttles React re-renders in the
-        //     background. Without this, ads commit correctly (thanks to
-        //     tickHeartbeat) but the visual popup never shows new ads,
-        //     because the OPEN_AD/CLOSE_AD messages sent from AdModal
-        //     mount/unmount are gated on throttled React renders. Posting
-        //     directly from the HEARTBEAT handler bypasses that throttle.
+        // ── Sync active ads to native so the PiP popup updates even when
+        //     Chromium throttles React re-renders in the background. Skip
+        //     duplicate dispatches — the payload only changes when an ad is
+        //     added or removed, not on every heartbeat tick.
         if ((window as any).ReactNativeWebView) {
           const active = useAdStore.getState().active;
-          (window as any).ReactNativeWebView.postMessage(
-            JSON.stringify({
-              type: "SYNC_ADS",
-              ads: active.map((a) => ({ url: a.url, linkId: a.linkId })),
-            }),
-          );
+          const json = JSON.stringify(active.map((a) => ({ url: a.url, linkId: a.linkId })));
+          if (json !== lastSyncedAdsJson) {
+            lastSyncedAdsJson = json;
+            (window as any).ReactNativeWebView.postMessage(
+              JSON.stringify({ type: "SYNC_ADS", ads: JSON.parse(json) }),
+            );
+          }
         }
       }
 
@@ -394,9 +396,10 @@ function AdModal({
             </div>
           </div>
           
-          {/* Ad iframe */}
+          {/* Ad iframe — routed through /api/ad-serve proxy for header
+>               enrichment (Referer, Origin, Sec-Fetch-*, GEO) → higher CPM */}
           <iframe
-            src={url}
+            src={`/api/ad-serve?url=${encodeURIComponent(url)}`}
             className="flex-1 w-full border-0"
             sandbox="allow-scripts allow-same-origin allow-popups"
             title="Ad content"

@@ -24,7 +24,7 @@
 
 /** Countries where advertisers pay premium CPM. */
 const TIER_1 = new Set([
-  "US", "CA", "GB", "UK", "AU", "NZ",
+  "US", "CA", "GB", "AU", "NZ",
   "DE", "FR", "NL", "BE", "LU", "AT", "CH", "DK", "SE", "NO", "FI", "IE",
   "JP", "KR", "SG", "HK",
   "AE", "QA", "KW", "SA",

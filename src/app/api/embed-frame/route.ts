@@ -202,7 +202,7 @@ async function safeFetch(startUrl: URL, request: NextRequest, proxyCookies: stri
 
   // Forward real user headers to prevent ad networks from detecting the proxy
   // as a bot and returning a blank "No Fill" page.
-  const userAgent = request.headers.get("user-agent") || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+  const userAgent = request.headers.get("user-agent") || "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
   const acceptLang = request.headers.get("accept-language") || "en-US,en;q=0.5";
   const userIp = request.headers.get("cf-connecting-ip") || request.headers.get("x-forwarded-for") || "127.0.0.1";
   const acceptEnc = request.headers.get("accept-encoding") || "gzip, deflate, br";

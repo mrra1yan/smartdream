@@ -15,11 +15,10 @@ import {
   AppState,
   NativeModules,
   NativeEventEmitter,
-  PermissionsAndroid,
 } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 
-const { FloatingWidgetModule, PipModule } = NativeModules;
+const { PipModule } = NativeModules;
 
 const WebViewComponent = WebView as any;
 
@@ -157,12 +156,6 @@ function App(): React.JSX.Element {
   useEffect(() => {
     fetchConfig();
 
-    if (Platform.OS === 'android') {
-      if (Platform.Version >= 33) {
-        void PermissionsAndroid.request(PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS);
-      }
-    }
-
     // ── PiP mode change listener ─────────────────────────────────────
     // MainActivity.onPictureInPictureModeChanged() emits this event.
     // When PiP is active we hide the main WebView so only ad content is
@@ -174,29 +167,9 @@ function App(): React.JSX.Element {
         pipEventSubscription = pipEmitter.addListener('onPipModeChanged', (event: boolean) => {
           setPipActive(event);
           pipActiveRef.current = event;
-          if (event) {
-            // ── PiP just activated ─────────────────────────────────────
-            // The Activity is now paused (onPause fired). React Native's JS
-            // thread may be suspended by the OS, which would stop the
-            // HEARTBEAT setInterval → main WebView JS timers get throttled
-            // → ads stop auto-closing. Start the FloatingWidgetService as a
-            // foreground service to keep the process alive and the HEARTBEAT
-            // pumping every second, just like the old overlay approach.
-            if (adsRef.current.length > 0 && autoLikeActiveRef.current && FloatingWidgetModule) {
-              FloatingWidgetModule.startService(JSON.stringify(adsRef.current));
-            }
-          } else {
-            // ── PiP dismissed (user tapped to return or swiped away) ────
-            // Keep the foreground service running as a fallback — the
-            // process is still backgrounded.
-            if (adsRef.current.length > 0 && autoLikeActiveRef.current && FloatingWidgetModule) {
-              FloatingWidgetModule.startService(JSON.stringify(adsRef.current));
-            }
-          }
         });
       } catch (_) {
-        // PipModule not available on this device/OS version — fall through
-        // to FloatingWidgetService-only path.
+        // PipModule not available on this device/OS version.
       }
     }
 
@@ -206,20 +179,11 @@ function App(): React.JSX.Element {
         const hasAds = adsRef.current.length > 0 && autoLikeActiveRef.current;
 
         if (nextAppState === 'background' || nextAppState === 'inactive') {
-          // ── PiP path (Android 8+, no permission needed) ───────────
+          // ── PiP path (Android 8+, zero permission needed) ──────────
           // PipModule.setPipReady(true) tells MainActivity.onUserLeaveHint()
           // to call enterPictureInPictureMode() on the next Home press.
-          // We don't start FloatingWidgetService here — PiP handles it.
           if (PipModule && hasAds) {
             PipModule.setPipReady(true, JSON.stringify(adsRef.current));
-          }
-
-          // ── Fallback: FloatingWidgetService for pre-API-26 ────────
-          // Only start the overlay service if PipModule is NOT available.
-          // The overlay service requires SYSTEM_ALERT_WINDOW permission —
-          // users on Android 8+ should never need to grant this.
-          if (!PipModule && FloatingWidgetModule && hasAds) {
-            FloatingWidgetModule.startService(JSON.stringify(adsRef.current));
           }
         } else if (nextAppState === 'active') {
           // ── Coming back to foreground ─────────────────────────────
@@ -227,16 +191,6 @@ function App(): React.JSX.Element {
           PipModule?.setPipReady(false, '[]');
           setPipActive(false);
           pipActiveRef.current = false;
-
-          // Stop any floating widget fallback service.
-          if (FloatingWidgetModule) {
-            FloatingWidgetModule.stopService();
-            setTimeout(() => {
-              if (appStateRef.current === 'active') {
-                FloatingWidgetModule.stopService();
-              }
-            }, 200);
-          }
         }
       }
     });
@@ -252,12 +206,6 @@ function App(): React.JSX.Element {
   useEffect(() => {
     if (Platform.OS === 'android') {
       // ── Keep PipModule in sync with current ad state ─────────────
-      // Whenever ads or auto-like state changes, update PipModule so
-      // onUserLeaveHint() always has the latest picture.
-      // IMPORTANT: keep pipReady=true when PiP is active and auto-like is
-      // running, even if ads is temporarily [] between batches. Otherwise
-      // the user could press Home during the 1-3s gap between ad batches
-      // and PiP would not enter.
       const shouldBePipReady = autoLikeActiveRef.current &&
         (ads.length > 0 || pipActiveRef.current);
       if (shouldBePipReady) {
@@ -266,22 +214,11 @@ function App(): React.JSX.Element {
         PipModule?.setPipReady(false, '[]');
       }
 
-      if (FloatingWidgetModule) {
-        // Keep service running when backgrounded + auto-like active.
-        // If ads are temporarily 0 but PiP is active and auto-like is
-        // running, DON'T stop — the auto-like loop will fetch new ads
-        // within seconds, and stopping/recreating the foreground service
-        // creates a kill window where aggressive OEMs could terminate
-        // the process before new ads arrive.
-        const inBackground = appStateRef.current === 'background' || appStateRef.current === 'inactive';
-        const shouldRun = autoLikeActiveRef.current && inBackground &&
-          (ads.length > 0 || pipActiveRef.current);
-
-        if (shouldRun) {
-          FloatingWidgetModule.updateAds(JSON.stringify(ads));
-        } else {
-          FloatingWidgetModule.stopService();
-        }
+      // ── Auto-exit PiP when ads run out ──────────────────────────
+      // If PiP is active but no ads remain (all completed/dismissed),
+      // exit PiP so the user doesn't see a blank black PiP window.
+      if (pipActiveRef.current && ads.length === 0) {
+        PipModule?.exitPip();
       }
     }
   }, [ads]);
@@ -394,16 +331,9 @@ function App(): React.JSX.Element {
       } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
         autoLikeActiveRef.current = data.active === true;
 
-        if (autoLikeActiveRef.current && Platform.OS === 'android') {
-          PipModule?.requestBatteryOptimizationIgnore();
-        }
-
-        // Immediately stop service if status became inactive while running
+        // When auto-like becomes inactive while PiP is running,
+        // exit PiP mode so the user isn't stuck in a blank PiP window.
         if (!autoLikeActiveRef.current && Platform.OS === 'android') {
-          if (FloatingWidgetModule) {
-            FloatingWidgetModule.stopService();
-          }
-          // Also disable PiP readiness so onUserLeaveHint won't trigger
           PipModule?.setPipReady(false, '[]');
           if (pipActiveRef.current) {
             PipModule?.exitPip();
@@ -517,26 +447,24 @@ function App(): React.JSX.Element {
         {/* Always visible — in normal mode it sits at the bottom, and in PiP
             mode it fills the entire PiP window since the main WebView is hidden. */}
         <View style={[styles.adsWrapper, pipActive && styles.adsWrapperPip, ads.length === 0 && { display: 'none' }]}>
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.scrollContent} bounces={false} overScrollMode="never">
+          <ScrollView
+            horizontal={!pipActive}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={pipActive ? styles.scrollContentPip : styles.scrollContent}
+            bounces={false}
+            overScrollMode="never"
+          >
             {[0, 1, 2].map((index) => {
-              // Properly map ads to fixed slots so they never shift/reload when other ads are removed
-              const ad = ads.find(a => {
-                if (!a) return false;
-                if ((a as any)._slot === undefined) {
-                  // Find first available slot
-                  const usedSlots = new Set(ads.map(x => (x as any)._slot));
-                  let nextSlot = 0;
-                  while (usedSlots.has(nextSlot)) nextSlot++;
-                  (a as any)._slot = nextSlot;
-                }
-                return (a as any)._slot === index;
-              });
+              // Assign stable slot indices: ads are mapped to fixed slots 0,1,2
+              // by their position in the array. This is deterministic and doesn't
+              // mutate ad objects during render (no render-phase side effect).
+              const ad = ads[index] || null;
 
               return (
               <View key={`ad-slot-${index}`} style={[
                 styles.floatingAdContainer, 
-                pipActive && styles.floatingAdContainerPip, 
-                pipActive && { position: 'absolute', top: 4, left: 10, right: 10, bottom: 4 }, // Stack them absolutely in PiP so all are in viewport
+                pipActive && styles.floatingAdContainerPip,
+                pipActive && { position: 'relative', top: undefined, left: undefined, right: undefined, bottom: undefined }, // PiP: stack vertically instead of absolute overlap
                 !ad && { display: 'none' }
               ]}>
                 <View style={styles.adHeader}>
@@ -557,7 +485,7 @@ function App(): React.JSX.Element {
                   // Default WebView UA includes app identifiers that ad
                   // networks flag as "in-app traffic" → lower CPM. A clean
                   // Chrome UA signals standard mobile browser traffic.
-                  userAgent="Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Mobile Safari/537.36"
+                  userAgent="Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
                   // ── Block malicious popups & downloads ─────────────────
                   // Override alert/confirm/prompt — malicious ad scripts use
                   // these to show fake "file downloaded" dialogs.
@@ -617,10 +545,11 @@ function App(): React.JSX.Element {
                   // Ad content is untrusted third-party. Lock cookies down
                   // on this WebView specifically (per-instance prop, does
                   // not affect the main WebView above) so the app's own
-                  // session cookie can never leak into ad content, and ad
-                  // content can't set cookies that ride along elsewhere.
+                  // session cookie can never leak into ad content.
+                  // thirdPartyCookiesEnabled=true lets ad networks set THEIR
+                  // own tracking cookies — needed for impression counting & CPM.
                   sharedCookiesEnabled={false}
-                  thirdPartyCookiesEnabled={false}
+                  thirdPartyCookiesEnabled={true}
                   cacheEnabled={true}
                   androidLayerType="hardware"
                 />
@@ -708,13 +637,14 @@ const styles = StyleSheet.create({
   pipOverlay: {
     // Covers the main WebView with black when PiP is active.
     // The WebView stays mounted (timers keep running) but is visually hidden.
+    // zIndex sits below adsWrapper so ad content remains visible in PiP.
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
     backgroundColor: '#000',
-    zIndex: 10,
+    zIndex: 1,
   },
   mainWebView: {
     flex: 1,
@@ -746,6 +676,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     // Add extra padding at bottom for Android gesture bar
     paddingBottom: Platform.OS === 'android' ? 24 : 10,
+    zIndex: 20, // Above pipOverlay (zIndex:1) so ads are visible in PiP mode
   },
   adsWrapperPip: {
     // In PiP mode, fill the entire window since main WebView is hidden
@@ -759,6 +690,11 @@ const styles = StyleSheet.create({
   scrollContent: {
     paddingHorizontal: 10,
   },
+  scrollContentPip: {
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+    gap: 4,
+  },
   floatingAdContainer: {
     width: 110, // Reduced to half (was 220)
     height: 160,
@@ -770,10 +706,11 @@ const styles = StyleSheet.create({
     marginRight: 10, // For spacing between items
   },
   floatingAdContainerPip: {
-    // In PiP mode, make ad containers adapt to the PiP window size
-    width: 140,
-    height: '100%' as any,
+    // In PiP mode, adapt to vertical stacking — each ad gets equal space
+    width: '100%' as any,
     flex: 1,
+    minHeight: 80,
+    marginBottom: 4,
   },
   adHeader: {
     flexDirection: 'row',

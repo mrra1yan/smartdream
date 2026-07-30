@@ -60,6 +60,7 @@ function ensureSafetyInterval() {
         now - ad.startedAt >= SAFETY_OVERDUE_MS
       ) {
         finalisingIds.add(ad.linkId);
+        clearTimer(ad.linkId); // prevent the original (throttled) setTimeout from firing
         void commitAndFinalise(ad.linkId, ad.token!, ad.source);
       }
     }

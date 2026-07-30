@@ -65,12 +65,6 @@ class MainActivity : ReactActivity() {
   }
 
   override fun onDestroy() {
-    try {
-      val intent = android.content.Intent(this, FloatingWidgetService::class.java)
-      stopService(intent)
-    } catch (e: Exception) {
-      e.printStackTrace()
-    }
     super.onDestroy()
   }
 

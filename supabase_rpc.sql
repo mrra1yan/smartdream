@@ -140,12 +140,20 @@ DECLARE
   v_owner_given_24h INT;
   v_owner_recv_24h INT;
   v_window_start TIMESTAMPTZ;
+  -- Atomic-update results (avoid TOCTOU races on concurrent likes)
+  v_new_used INT;
+  v_quota INT;
 BEGIN
   -- 0a. Serialize concurrent calls for the same (liker, link) pair
   PERFORM pg_advisory_xact_lock(hashtextextended(p_liker_id::text || ':' || p_link_id::text, 0));
 
   -- 0b. Serialize concurrent calls toward the same RECEIVER
   PERFORM pg_advisory_xact_lock(hashtextextended(p_receiver_id::text, 1));
+
+  -- 0c. Serialize concurrent calls from the same LIKER (prevents TOCTOU races
+  --     on auto_like_used and boosted_offer_count when two likes land on
+  --     different links simultaneously).
+  PERFORM pg_advisory_xact_lock(hashtextextended(p_liker_id::text, 2));
 
   -- 1. Check 12h cooldown
   SELECT COUNT(*) INTO v_recent_like_count
@@ -214,16 +222,38 @@ BEGIN
           auto_like_expiry = null
       WHERE id = p_liker_id;
     ELSIF v_liker_profile.auto_like_model = 'usage' AND v_liker_profile.auto_like_quota IS NOT NULL THEN
-      IF (COALESCE(v_liker_profile.auto_like_used, 0) + 1) >= v_liker_profile.auto_like_quota THEN
-        UPDATE profiles
-        SET auto_like_used = COALESCE(auto_like_used, 0) + 1,
-            auto_like_enabled = false,
-            auto_like_model = 'none',
-            auto_like_quota = null
-        WHERE id = p_liker_id;
-      ELSE
+      -- Atomic increment with quota ceiling (avoids TOCTOU race where two
+      -- concurrent likes on different links both read the old auto_like_used
+      -- before either writes — the WHERE clause makes this serialisable).
+      WITH updated AS (
         UPDATE profiles
         SET auto_like_used = COALESCE(auto_like_used, 0) + 1
+        WHERE id = p_liker_id
+          AND auto_like_enabled
+          AND NOT COALESCE(auto_like_paused, false)
+          AND auto_like_model = 'usage'
+          AND auto_like_quota IS NOT NULL
+          AND COALESCE(auto_like_used, 0) < auto_like_quota
+        RETURNING auto_like_used, auto_like_quota
+      )
+      SELECT auto_like_used, auto_like_quota INTO v_new_used, v_quota FROM updated;
+
+      IF FOUND THEN
+        IF v_new_used >= v_quota THEN
+          UPDATE profiles
+          SET auto_like_enabled = false,
+              auto_like_model = 'none',
+              auto_like_quota = null
+          WHERE id = p_liker_id;
+        END IF;
+      ELSE
+        -- Quota already exhausted by a concurrent transaction —
+        -- clean up the stale enabled flag so the next status check
+        -- correctly reports inactive.
+        UPDATE profiles
+        SET auto_like_enabled = false,
+            auto_like_model = 'none',
+            auto_like_quota = null
         WHERE id = p_liker_id;
       END IF;
     END IF;
@@ -243,16 +273,32 @@ BEGIN
 
   IF v_owner_profile.is_boosted AND p_is_boosted_like AND NOT COALESCE(v_owner_profile.is_elite, false) THEN
     IF v_owner_profile.boost_model = 'usage' AND v_owner_profile.boost_quota IS NOT NULL THEN
-      IF (COALESCE(v_owner_profile.boost_used, 0) + 1) >= v_owner_profile.boost_quota THEN
-        UPDATE profiles
-        SET boost_used = COALESCE(boost_used, 0) + 1,
-            is_boosted = false,
-            boost_model = 'none',
-            boost_quota = null
-        WHERE id = p_receiver_id;
-      ELSE
+      -- Atomic increment with quota ceiling (avoids same TOCTOU race as above)
+      WITH updated AS (
         UPDATE profiles
         SET boost_used = COALESCE(boost_used, 0) + 1
+        WHERE id = p_receiver_id
+          AND is_boosted
+          AND boost_model = 'usage'
+          AND boost_quota IS NOT NULL
+          AND COALESCE(boost_used, 0) < boost_quota
+        RETURNING boost_used, boost_quota
+      )
+      SELECT boost_used, boost_quota INTO v_new_used, v_quota FROM updated;
+
+      IF FOUND THEN
+        IF v_new_used >= v_quota THEN
+          UPDATE profiles
+          SET is_boosted = false,
+              boost_model = 'none',
+              boost_quota = null
+          WHERE id = p_receiver_id;
+        END IF;
+      ELSE
+        UPDATE profiles
+        SET is_boosted = false,
+            boost_model = 'none',
+            boost_quota = null
         WHERE id = p_receiver_id;
       END IF;
     ELSE

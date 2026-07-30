@@ -6,6 +6,7 @@ import { getSettings } from "@/lib/settings";
 import { issueAdViewToken, verifyAdViewToken, consumeAdViewToken } from "@/lib/ad-view-token";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { bangladeshMidnightISO } from "@/lib/timezone";
+import { TOTAL_AD_SECONDS } from "@/lib/types";
 
 // Legitimate ceiling: the client runs at most MAX_CONCURRENT_ADS (3) ad slots
 // at once, each cycling roughly every TOTAL_AD_SECONDS (9s) plus network/UI
@@ -78,6 +79,21 @@ export async function commitLikeAction(
   if (!consumeAdViewToken(claims.jti)) {
     console.warn("[commitLikeAction] Ad-view token already used:", claims.jti);
     return { ok: false, error: "ad-view token already used" };
+  }
+
+  // ── Server-side elapsed-time enforcement ──────────────────────────────
+  // The token carries the server timestamp from startAdView(). Verify that
+  // the client actually waited the full ad-view duration before committing.
+  // A 1-second grace window tolerates minor clock skew and network latency,
+  // but rejects instant commits that bypass the client-side timer entirely.
+  const elapsed = Date.now() - claims.startedAtMs;
+  const minRequiredMs = TOTAL_AD_SECONDS * 1000 - 1000; // 8 s minimum (9 s total, 1 s grace)
+  if (elapsed < minRequiredMs) {
+    console.warn(
+      "[commitLikeAction] Commit too early:",
+      Math.round(elapsed / 1000), "s elapsed, need ≥", Math.round(minRequiredMs / 1000), "s",
+    );
+    return { ok: false, error: "too_early" };
   }
 
   // Parallel: link+owner in one join, settings via React-cached helper.
