@@ -185,6 +185,11 @@ function App(): React.JSX.Element {
     }
   }
 
+  const networkErrorRef = useRef<boolean>(networkError);
+  useEffect(() => {
+    networkErrorRef.current = networkError;
+  }, [networkError]);
+
   useEffect(() => {
     fetchConfig();
 
@@ -200,23 +205,20 @@ function App(): React.JSX.Element {
     // auto-recover (dismiss error + reload) when connectivity returns.
     // Replaces the old "user must tap Retry" flow for network recovery.
     const netInfoSub = NetInfo.addEventListener((state) => {
-      if (!state.isConnected) {
+      if (state.isConnected === false) {
         setNetworkError(true);
-      } else {
+      } else if (state.isConnected === true) {
         // Network returned — auto-recover if the error modal is showing
-        setNetworkError((prev) => {
-          if (prev) {
-            // Network just came back while error was showing — reload
-            retryCountRef.current = 0;
-            setWebViewLoading(true);
-            setTimeout(() => {
-              if (mainWebViewRef.current) {
-                mainWebViewRef.current.reload();
-              }
-            }, 500);
-          }
-          return false;
-        });
+        if (networkErrorRef.current) {
+          setNetworkError(false);
+          retryCountRef.current = 0;
+          setWebViewLoading(true);
+          setTimeout(() => {
+            if (mainWebViewRef.current) {
+              mainWebViewRef.current.reload();
+            }
+          }, 500);
+        }
       }
     });
 
@@ -275,7 +277,7 @@ function App(): React.JSX.Element {
   // when the device is genuinely offline.
   const handleWebViewError = useCallback(async () => {
     const state = await NetInfo.fetch();
-    if (!state.isConnected) {
+    if (state.isConnected === false) {
       // Device is genuinely offline → show error immediately
       setNetworkError(true);
       return;
@@ -429,10 +431,11 @@ function App(): React.JSX.Element {
             retryCountRef.current = 0;
             dispatchToWeb({ type: 'BRIDGE_INIT' });
           }}
-          onLoadProgress={({ nativeEvent }: any) => {
+          onLoadProgress={(syntheticEvent: any) => {
             // Hide spinner early when page is 75%+ loaded.
             // Bypasses permanent spinner hangs caused by slow background scripts.
-            if (nativeEvent.progress > 0.75) {
+            const progress = syntheticEvent?.nativeEvent?.progress;
+            if (typeof progress === 'number' && progress > 0.75) {
               setWebViewLoading(false);
             }
           }}
@@ -471,8 +474,8 @@ function App(): React.JSX.Element {
           }}
           onError={() => handleWebViewError()}
           onHttpError={(syntheticEvent: any) => {
-            const { nativeEvent } = syntheticEvent;
-            if (nativeEvent.statusCode >= 500) {
+            const statusCode = syntheticEvent?.nativeEvent?.statusCode;
+            if (typeof statusCode === 'number' && statusCode >= 500) {
               handleWebViewError();
             }
           }}
