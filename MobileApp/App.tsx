@@ -18,7 +18,7 @@ import {
 } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 
-const { PipModule } = NativeModules;
+const { PipModule, KeepAliveModule } = NativeModules;
 
 const WebViewComponent = WebView as any;
 
@@ -167,6 +167,14 @@ function App(): React.JSX.Element {
         pipEventSubscription = pipEmitter.addListener('onPipModeChanged', (event: boolean) => {
           setPipActive(event);
           pipActiveRef.current = event;
+          if (event) {
+            // PiP activated — start keep-alive service so Android doesn't
+            // throttle the WebView's JavaScript timers (ad countdowns).
+            KeepAliveModule?.start();
+          } else {
+            // PiP dismissed — stop the keep-alive service.
+            KeepAliveModule?.stop();
+          }
         });
       } catch (_) {
         // PipModule not available on this device/OS version.
@@ -185,12 +193,21 @@ function App(): React.JSX.Element {
           if (PipModule && hasAds) {
             PipModule.setPipReady(true, JSON.stringify(adsRef.current));
           }
+          // ── Pre-start keep-alive service before PiP enters ─────────
+          // When PiP hasn't activated yet but the app is backgrounded
+          // with auto-like running, start the service immediately so
+          // timers don't get throttled during the transition.
+          if (autoLikeActiveRef.current) {
+            KeepAliveModule?.start();
+          }
         } else if (nextAppState === 'active') {
           // ── Coming back to foreground ─────────────────────────────
           // Disable PiP readiness (onUserLeaveHint won't fire now).
           PipModule?.setPipReady(false, '[]');
           setPipActive(false);
           pipActiveRef.current = false;
+          // Stop keep-alive service — foreground doesn't need it.
+          KeepAliveModule?.stop();
         }
       }
     });
@@ -335,6 +352,7 @@ function App(): React.JSX.Element {
         // exit PiP mode so the user isn't stuck in a blank PiP window.
         if (!autoLikeActiveRef.current && Platform.OS === 'android') {
           PipModule?.setPipReady(false, '[]');
+          KeepAliveModule?.stop();
           if (pipActiveRef.current) {
             PipModule?.exitPip();
           }
