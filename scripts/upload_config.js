@@ -21,7 +21,7 @@ async function setup() {
 
   // Upload config file
   const configContent = JSON.stringify({
-    webUrl: "https://smart-dream.vercel.app",
+    webUrl: "https://smart-dream-admin.vercel.app",
     latestVersion: "1.0.0",
     forceUpdate: true,
     downloadUrl: "https://github.com/nurulhudda247/SmartDream-Releases/releases/latest/download/SmartDream.apk",
