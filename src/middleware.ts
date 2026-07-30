@@ -103,6 +103,9 @@ export async function middleware(request: NextRequest) {
       },
     });
 
+    const cookieCount = request.cookies.getAll().length;
+    const hasAuthCookies = request.cookies.getAll().some((c) => c.name.startsWith("sb-"));
+
     try {
       const { data: { session: supabaseSession } } = await Promise.race([
         supabase.auth.getSession(),
@@ -115,11 +118,24 @@ export async function middleware(request: NextRequest) {
         const role = (user.user_metadata?.role as string | undefined) ?? null;
         const status = (user.user_metadata?.status as string | undefined) ?? null;
         session = { sub: user.id, role: role ?? "user", status: status ?? "pending" };
+        console.log("[MIDDLEWARE] getSession success — user:", user.id.slice(0, 8), "role:", role, "status:", status, "path:", pathname);
+      } else {
+        console.log("[MIDDLEWARE] getSession returned null session — cookies:", cookieCount, "hasAuthCookies:", hasAuthCookies, "path:", pathname);
       }
     } catch {
       // getSession() timed out — fall back to direct JWT decode.
+      console.log("[MIDDLEWARE] getSession timeout — falling back to cookie decode. cookies:", cookieCount, "hasAuthCookies:", hasAuthCookies, "path:", pathname);
       session = getSessionFromCookie(request.cookies.getAll());
+      if (session) {
+        console.log("[MIDDLEWARE] Cookie decode fallback success — user:", session.sub.slice(0, 8), "role:", session.role);
+      } else {
+        console.log("[MIDDLEWARE] Cookie decode fallback returned null — no session");
+      }
     }
+  }
+
+  if (isProtected && !session) {
+    console.log("[MIDDLEWARE] No session on protected route — redirecting to /login. path:", pathname);
   }
 
   // Logged in → redirect away from auth pages (only if approved).

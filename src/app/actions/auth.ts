@@ -276,8 +276,11 @@ export async function login(
     }
 
     if (!profile) {
+      console.log("[LOGIN] Profile not found for identifier:", identifier.slice(0, 3) + "***");
       return { message: t("auth.errorInvalidCredentials") };
     }
+
+    console.log("[LOGIN] Profile found — role:", profile.role, "status:", profile.status, "expectedRole:", expectedRole);
 
     // Check the role gate BEFORE verifying the password (and reuse the exact
     // same generic message as a bad password). Checking this after
@@ -286,20 +289,25 @@ export async function login(
     // ("invalid credentials"), turning any login portal into an oracle that
     // validates password guesses and leaks the target account's role.
     if ((profile.role as Role) !== expectedRole) {
+      console.log("[LOGIN] Role mismatch — profile role:", profile.role, "expected:", expectedRole);
       return { message: t("auth.errorInvalidCredentials") };
     }
 
     const serverClient = await createSupabaseServerClient();
 
     // Authenticate against Supabase Auth using the resolved email.
-    const { error: signInError } = await serverClient.auth.signInWithPassword({
+    console.log("[LOGIN] Calling signInWithPassword for:", profile.email);
+    const { data: authData, error: signInError } = await serverClient.auth.signInWithPassword({
       email: profile.email,
       password,
     });
 
     if (signInError) {
+      console.log("[LOGIN] signInWithPassword failed:", signInError.message);
       return { message: t("auth.errorInvalidCredentials") };
     }
+
+    console.log("[LOGIN] signInWithPassword success — user:", authData.user?.id, "session:", !!authData.session);
 
     if (profile.status === "pending") {
       return { pending: true, name: `${profile.first_name} ${profile.last_name}`, publicId: profile.public_id };
@@ -309,6 +317,7 @@ export async function login(
       return { message: t("auth.errorRejected") };
     }
 
+    console.log("[LOGIN] Redirecting to:", ROLE_HOME[profile.role] ?? "/");
     redirect(ROLE_HOME[profile.role] ?? "/");
   } catch (err) {
     if (err instanceof Error && (err as { digest?: string }).digest?.startsWith("NEXT_REDIRECT")) {

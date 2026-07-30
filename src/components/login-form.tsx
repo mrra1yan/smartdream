@@ -1,8 +1,8 @@
 "use client";
 
-import { useActionState, useEffect } from "react";
+import { useActionState, useEffect, useState, useRef } from "react";
 import Link from "next/link";
-import { Mail, Lock, Loader2 } from "lucide-react";
+import { Mail, Lock, Loader2, AlertTriangle } from "lucide-react";
 import { PasswordInput } from "@/components/ui/password-input";
 import { PendingPopup } from "@/components/pending-popup";
 import { useI18n } from "@/components/i18n-provider";
@@ -13,6 +13,9 @@ import { motion } from "framer-motion";
 import { StaggerContainer, StaggerItem } from "@/components/ui/motion-wrapper";
 
 type LoginState = { message?: string; pending?: boolean; name?: string; publicId?: string } | undefined;
+
+/** Seconds before we consider a server action permanently stuck (network error, CORS rejection, etc.). */
+const LOGIN_TIMEOUT_SECONDS = 15;
 
 export function LoginForm({
   role: _role,
@@ -33,6 +36,28 @@ export function LoginForm({
     action,
     undefined,
   );
+
+  // Detect when a server action gets permanently stuck (network error, CORS
+  // rejection, etc.) and surface a visible error instead of spinning forever.
+  const [submitTimedOut, setSubmitTimedOut] = useState(false);
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (pending) {
+      setSubmitTimedOut(false);
+      timeoutRef.current = setTimeout(() => {
+        setSubmitTimedOut(true);
+      }, LOGIN_TIMEOUT_SECONDS * 1000);
+    } else {
+      if (timeoutRef.current) {
+        clearTimeout(timeoutRef.current);
+        timeoutRef.current = null;
+      }
+    }
+    return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    };
+  }, [pending]);
 
   useEffect(() => {
     if (state?.message) {
@@ -93,14 +118,20 @@ export function LoginForm({
 
         {/* Submit */}
         <StaggerItem>
+          {submitTimedOut && pending && (
+            <div className="flex items-center gap-2 rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-sm text-amber-600 dark:text-amber-400 mb-2">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>{t("auth.errorTimeout") || "Request timed out. Please check your connection and try again."}</span>
+            </div>
+          )}
           <motion.button
             type="submit"
-            disabled={pending}
+            disabled={pending && !submitTimedOut}
             whileHover={{ scale: 1.015 }}
             whileTap={{ scale: 0.985 }}
             className="w-full h-12 rounded-xl bg-gradient-to-r from-accent via-indigo-500 to-purple-600 text-white font-semibold text-sm shadow-md shadow-accent/20 hover:shadow-lg hover:shadow-accent/30 transition-all duration-300 disabled:opacity-60 disabled:cursor-not-allowed flex items-center justify-center gap-2.5"
           >
-            {pending ? (
+            {pending && !submitTimedOut ? (
               <>
                 <Loader2 className="h-4 w-4 animate-spin" />
                 {t("common.loading")}

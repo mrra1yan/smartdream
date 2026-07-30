@@ -45,10 +45,18 @@ export async function createSupabaseServerClient() {
             cookiesToSet.forEach(({ name, value, options }) =>
               store.set(name, value, options),
             );
-          } catch {
-            // The `setAll` method was called from a Server Component where
-            // cookies cannot be set. This can safely be ignored if middleware
-            // is configured to refresh sessions — which it is.
+          } catch (err) {
+            // In Server Components, cookies().set() throws because the response
+            // has already been sent. That is harmless — middleware will refresh
+            // the session on the next request.
+            //
+            // In Server Actions / Route Handlers, cookies CAN be set. A failure
+            // here means the session cookie won't be written to the response,
+            // which will break login. Log it so we can diagnose.
+            console.error(
+              "[supabase/server] Failed to set auth cookies (this is expected in Server Components, but is a bug in Actions/Handlers):",
+              (err as Error).message ?? err,
+            );
           }
         },
       },

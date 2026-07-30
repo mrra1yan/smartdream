@@ -93,6 +93,9 @@
     "errorPhoneInvalid": "Phone number is invalid.",
     "errorPhoneOnlyNumbers": "Phone number must contain only numbers.",
     "errorEmailInvalid": "Invalid email address.",
+    "errorTimeout": "Request timed out. Please check your connection and try again.",
+    "errorTooManyRequests": "Too many attempts. Please try again later.",
+    "errorPhoneExists": "An account with this phone number already exists.",
     "referralCodeOptional": "Referral Code (Optional)",
     "enterFriendId": "Enter friend's public ID"
   },
