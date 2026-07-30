@@ -256,11 +256,13 @@ export async function login(
     // filter syntax instead of a literal value — since this query runs on the
     // service-role client (RLS bypassed), that could let an attacker match an
     // arbitrary row (e.g. the super-admin's) without knowing its email/phone.
+    // Only select columns needed for login: identity + auth gate + redirect target.
+    const LOGIN_COLUMNS = "id,email,role,status,first_name,last_name,public_id";
     let profile: any = null;
     if (identifier) {
       const { data: byEmail } = await supabase
         .from("profiles")
-        .select("*")
+        .select(LOGIN_COLUMNS)
         .eq("email", identifier)
         .maybeSingle();
       profile = byEmail;
@@ -268,7 +270,7 @@ export async function login(
       if (!profile) {
         const { data: byPhone } = await supabase
           .from("profiles")
-          .select("*")
+          .select(LOGIN_COLUMNS)
           .eq("phone", identifier)
           .maybeSingle();
         profile = byPhone;

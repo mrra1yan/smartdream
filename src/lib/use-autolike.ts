@@ -17,6 +17,13 @@ type Status = {
 };
 
 /** Auto-like uses in-page modal popups only. */
+
+/** Main loop tick interval in ms. Balances responsiveness with database load:
+ *  - 1000ms = ~30 DB round-trips/min/user (original, too aggressive)
+ *  - 5000ms = ~6 DB round-trips/min/user (5× reduction, still responsive)
+ * Ads still complete on their own per-ad setTimeout (TOTAL_AD_SECONDS=9s),
+ * so the tick only affects feed refill + progress display granularity. */
+const LOOP_TICK_MS = 5000;
 export function useAutoLike() {
   const [running, setRunning] = useState(false);
   const [progress, setProgress] = useState({ liked: 0, failed: 0 });
@@ -410,7 +417,7 @@ export function useAutoLike() {
         });
 
         if (runningRef.current) {
-          setTimeout(loop, 1000);
+          setTimeout(loop, LOOP_TICK_MS);
         }
       };
 
