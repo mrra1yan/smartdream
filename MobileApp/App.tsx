@@ -153,6 +153,34 @@ function App(): React.JSX.Element {
   const autoLikeActiveRef = useRef<boolean>(false);
   const pipActiveRef = useRef<boolean>(false);
 
+  // ── Keep PipModule.pipReady in sync with current state ─────────────
+  // Must be called whenever auto-like status OR ads change so
+  // MainActivity.onUserLeaveHint() always sees the correct flag.
+  function syncPipReady() {
+    if (Platform.OS !== 'android' || !PipModule) return;
+    const should =
+      autoLikeActiveRef.current &&
+      (adsRef.current.length > 0 || pipActiveRef.current);
+    PipModule.setPipReady(
+      should,
+      should ? JSON.stringify(adsRef.current) : '[]',
+    );
+  }
+
+  // ── Route native ad WebView requests through the embed-frame proxy ─
+  // The proxy (src/app/api/embed-frame) strips X-Frame-Options / CSP,
+  // enriches traffic-quality headers for higher CPM, and handles
+  // redirects server-side — preventing the "black screen" caused when
+  // an ad network 302-redirects to Play Store and our WebView blocks it.
+  function getProxiedAdUrl(adUrl: string): string {
+    try {
+      const base = new URL(webUrl);
+      return `${base.origin}/api/embed-frame?url=${encodeURIComponent(adUrl)}`;
+    } catch {
+      return `https://smart-dream-admin.vercel.app/api/embed-frame?url=${encodeURIComponent(adUrl)}`;
+    }
+  }
+
   useEffect(() => {
     fetchConfig();
 
@@ -203,8 +231,10 @@ function App(): React.JSX.Element {
           }
         } else if (nextAppState === 'active') {
           // ── Coming back to foreground ─────────────────────────────
-          // Disable PiP readiness (onUserLeaveHint won't fire now).
-          PipModule?.setPipReady(false, '[]');
+          // Recalculate pipReady — don't unconditionally reset to false.
+          // If auto-like is still active with ads, pipReady should stay
+          // true so the next Home press enters PiP again.
+          syncPipReady();
           setPipActive(false);
           pipActiveRef.current = false;
           // Stop keep-alive service — foreground doesn't need it.
@@ -224,13 +254,7 @@ function App(): React.JSX.Element {
   useEffect(() => {
     if (Platform.OS === 'android') {
       // ── Keep PipModule in sync with current ad state ─────────────
-      const shouldBePipReady = autoLikeActiveRef.current &&
-        (ads.length > 0 || pipActiveRef.current);
-      if (shouldBePipReady) {
-        PipModule?.setPipReady(true, JSON.stringify(ads));
-      } else {
-        PipModule?.setPipReady(false, '[]');
-      }
+      syncPipReady();
 
       // ── Auto-exit PiP when ads run out ──────────────────────────
       // If PiP is active but no ads remain (all completed/dismissed),
@@ -348,6 +372,13 @@ function App(): React.JSX.Element {
         });
       } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
         autoLikeActiveRef.current = data.active === true;
+
+        // ── Keep pipReady in sync whenever auto-like toggles ─────────
+        // Previously pipReady was only updated in useEffect([ads]),
+        // which doesn't fire when ONLY auto-like status changes — so
+        // PiP could be permanently disabled if the user toggles
+        // auto-like without any ad list changes.
+        syncPipReady();
 
         // When auto-like becomes inactive while PiP is running,
         // exit PiP mode so the user isn't stuck in a blank PiP window.
@@ -492,9 +523,17 @@ function App(): React.JSX.Element {
                   </TouchableOpacity>
                 </View>
                 <WebViewComponent
-                  source={{ uri: ad ? ad.url : 'about:blank' }}
+                  source={{ uri: ad ? getProxiedAdUrl(ad.url) : 'about:blank' }}
                   style={styles.floatingWebView}
                   onLoadEnd={() => { if (ad) dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId }) }}
+                  onError={(syntheticEvent: any) => {
+                    const { nativeEvent } = syntheticEvent;
+                    console.log('Ad WebView error:', nativeEvent);
+                  }}
+                  onHttpError={(syntheticEvent: any) => {
+                    const { nativeEvent } = syntheticEvent;
+                    console.log('Ad WebView HTTP error:', nativeEvent.statusCode);
+                  }}
                   allowsInlineMediaPlayback
                   mediaPlaybackRequiresUserAction={false}
                   javaScriptEnabled

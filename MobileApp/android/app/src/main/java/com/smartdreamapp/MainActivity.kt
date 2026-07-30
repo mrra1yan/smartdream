@@ -52,14 +52,18 @@ class MainActivity : ReactActivity() {
    */
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
-    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && PipModule.pipReady) {
-      try {
-        val params = PictureInPictureParams.Builder().build()
-        enterPictureInPictureMode(params)
-      } catch (e: Exception) {
-        // OEMs may reject PiP under certain conditions (e.g. device policy,
-        // low-RAM devices). Silently fall back to normal backgrounding.
-        e.printStackTrace()
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+      if (PipModule.pipReady) {
+        try {
+          val params = PictureInPictureParams.Builder().build()
+          enterPictureInPictureMode(params)
+        } catch (e: Exception) {
+          // OEMs may reject PiP under certain conditions (e.g. device policy,
+          // low-RAM devices). Silently fall back to normal backgrounding.
+          e.printStackTrace()
+        }
+      } else {
+        android.util.Log.d("MainActivity", "onUserLeaveHint: pipReady is false, skipping PiP")
       }
     }
   }
