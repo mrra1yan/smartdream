@@ -98,9 +98,9 @@ export async function middleware(request: NextRequest) {
   // Supabase auth server is slow.  Token refresh still happens inside
   // server components via createSupabaseServerClient().
   const {
-    data: { session },
+    data: { session: supabaseSession },
   } = await supabase.auth.getSession();
-  const user = session?.user ?? null;
+  const user = supabaseSession?.user ?? null;
 
   const role = (user?.user_metadata?.role as string | undefined) ?? null;
   const status = (user?.user_metadata?.status as string | undefined) ?? null;
