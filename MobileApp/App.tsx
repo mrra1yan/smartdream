@@ -19,9 +19,9 @@ import NetInfo from '@react-native-community/netinfo';
 
 const WebViewComponent = WebView as any;
 
-const CONFIG_URL = 'https://ihhpybntlaqvbhdmksjl.supabase.co/storage/v1/object/public/app-config/config.json';
+const CONFIG_URL = 'https://axzletfmciwquywhfxsq.supabase.co/storage/v1/object/public/app-config/config.json';
 const APP_VERSION = '1.0.0';
-const DEFAULT_WEB_URL = 'https://smart-dream-admin.vercel.app';
+const DEFAULT_WEB_URL = 'https://smart-dream.vercel.app';
 // Matches src/app/api/app-version/route.ts's own default downloadUrl -- the
 // known-good fallback if remote config ever hands us an untrusted one.
 const DEFAULT_DOWNLOAD_URL = 'https://github.com/nurulhudda247/SmartDream-Releases/releases/latest/download/SmartDream.apk';
