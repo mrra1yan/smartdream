@@ -1,8 +1,7 @@
 import type { Metadata, Viewport } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
-import { I18nProvider } from "@/components/i18n-provider";
-import { getI18n } from "@/lib/i18n";
+import { I18nShell } from "@/components/i18n-provider";
 import { Toaster } from "sonner";
 import "./globals.css";
 
@@ -32,16 +31,19 @@ export const viewport: Viewport = {
   userScalable: false,
 };
 
-export default async function RootLayout({
+/**
+ * Static root layout — no `cookies()`, no `headers()`, no `async`.
+ * This allows the HTML shell to be statically generated and CDN-cached.
+ * Locale detection and I18nProvider are handled client-side by <I18nShell>.
+ */
+export default function RootLayout({
   children,
 }: Readonly<{
   children: React.ReactNode;
 }>) {
-  const { locale, dictionary } = await getI18n();
-
   return (
     <html
-      lang={locale}
+      lang="en"
       suppressHydrationWarning
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
@@ -52,10 +54,10 @@ export default async function RootLayout({
           enableSystem
           disableTransitionOnChange
         >
-          <I18nProvider locale={locale} dictionary={dictionary}>
+          <I18nShell>
             {children}
             <Toaster position="top-right" richColors closeButton />
-          </I18nProvider>
+          </I18nShell>
         </ThemeProvider>
       </body>
     </html>

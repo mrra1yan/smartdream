@@ -1,6 +1,5 @@
 import type { Metadata } from "next";
 import { getI18n } from "@/lib/i18n";
-import { getSettings } from "@/lib/settings";
 import { LoginForm } from "@/components/login-form";
 import { login } from "@/app/actions/auth";
 import * as React from "react";
@@ -11,7 +10,6 @@ export const metadata: Metadata = { title: "Super admin log in | Smart Dream" };
 
 export default async function SuperAdminLoginPage() {
   const { t } = await getI18n();
-  const settings = await getSettings();
   const loginAction = login.bind(null, "super_admin");
 
   return (
@@ -22,7 +20,7 @@ export default async function SuperAdminLoginPage() {
       />
       
       <GlassCard>
-        <LoginForm role="super_admin" whatsappNumber={settings.whatsappNumber} action={loginAction} />
+        <LoginForm role="super_admin" action={loginAction} />
       </GlassCard>
     </div>
   );

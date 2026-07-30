@@ -17,7 +17,7 @@ export function SignupForm({
   referralCode,
   action,
 }: {
-  whatsappNumber: string;
+  whatsappNumber?: string;
   referralCode?: string;
   action: (state: AuthFormState, formData: FormData) => Promise<AuthFormState>;
 }) {

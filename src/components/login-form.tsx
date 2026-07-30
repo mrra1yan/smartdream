@@ -22,7 +22,7 @@ export function LoginForm({
   isPending,
 }: {
   role: Role;
-  whatsappNumber: string;
+  whatsappNumber?: string;
   action: (state: LoginState, formData: FormData) => Promise<LoginState>;
   href?: { signup?: string; alt?: { label: string; href: string }[] };
   isPending?: boolean;

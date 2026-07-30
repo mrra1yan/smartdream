@@ -14,7 +14,7 @@ export function PendingPopup({
   id,
   onClose,
 }: {
-  whatsappNumber: string;
+  whatsappNumber?: string;
   message?: string;
   whatsappMessage?: string;
   name?: string;
@@ -30,10 +30,9 @@ export function PendingPopup({
     ? t("pending.whatsappMessageWithName", { name })
     : t("pending.whatsappMessage");
 
-  const href = whatsappLink(
-    whatsappNumber,
-    whatsappMessage ?? defaultMessage,
-  );
+  const href = whatsappNumber
+    ? whatsappLink(whatsappNumber, whatsappMessage ?? defaultMessage)
+    : null;
 
   const handleClose = onClose ?? (() => {
     window.location.href = "/login";
@@ -81,14 +80,16 @@ export function PendingPopup({
         <p className="mt-2 text-center text-sm text-muted">
           {message ?? t("pending.whatsappHint")}
         </p>
-        <Button
-          className="mt-5 w-full cursor-pointer"
-          variant="accent"
-          onClick={() => window.open(href, "_blank")}
-        >
-          <MessageCircle className="h-4 w-4" />
-          {t("auth.whatsapp")}
-        </Button>
+        {href && (
+          <Button
+            className="mt-5 w-full cursor-pointer"
+            variant="accent"
+            onClick={() => window.open(href, "_blank")}
+          >
+            <MessageCircle className="h-4 w-4" />
+            {t("auth.whatsapp")}
+          </Button>
+        )}
       </motion.div>
     </div>
   );

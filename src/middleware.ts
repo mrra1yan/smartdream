@@ -61,70 +61,66 @@ export async function middleware(request: NextRequest) {
   response.headers.set("Permissions-Policy",
     "camera=(), microphone=(), geolocation=(), interest-cohort=()");
 
-  const supabase = createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    // Keep this in sync with `createSupabaseServerClient()`
-    // (@/lib/supabase/server.ts): without an explicit `httpOnly`/`secure`,
-    // `@supabase/ssr` defaults to `httpOnly: false` with no `secure` flag,
-    // so a session cookie refreshed here (on token near-expiry) would
-    // silently drop back to being readable via client-side `document.cookie`
-    // even after the server-client fix. Reading via `request.cookies` below
-    // is unaffected by `httpOnly` either way (it comes from the `Cookie`
-    // request header, not the browser's JS-facing cookie jar).
-    cookieOptions: {
-      httpOnly: true,
-      secure: true,
-      sameSite: "lax",
-    },
-    cookies: {
-      getAll() {
-        return request.cookies.getAll();
-      },
-      setAll(cookiesToSet) {
-        cookiesToSet.forEach(({ name, value, options }) =>
-          response.cookies.set(name, value, options),
-        );
-      },
-    },
-  });
-
-  // ── Session extraction with timeout safety net ─────────────────────
-  // `getSession()` usually resolves instantly (local JWT decode) but may
-  // trigger a network call to Supabase Auth to refresh an expired access
-  // token. That refresh can exceed Vercel's Edge middleware timeout
-  // (1.5 s hobby / 5 s pro) when the auth server is slow from this edge
-  // region — causing a 504 MIDDLEWARE_INVOCATION_TIMEOUT.
-  //
-  // Strategy: race getSession() against an 800 ms deadline. On timeout,
-  // fall back to zero-network JWT decode from the cookie — the expired
-  // token's role/status claims are still valid for route guards. The
-  // actual token refresh is deferred to the next fast request or to
-  // route handlers / server actions (which have longer timeouts).
-  let session: SessionClaims | null = null;
-  try {
-    const { data: { session: supabaseSession } } = await Promise.race([
-      supabase.auth.getSession(),
-      new Promise<never>((_, reject) =>
-        setTimeout(() => reject(new Error("getSession timeout")), 800),
-      ),
-    ]);
-    const user = supabaseSession?.user ?? null;
-    if (user) {
-      const role = (user.user_metadata?.role as string | undefined) ?? null;
-      const status = (user.user_metadata?.status as string | undefined) ?? null;
-      session = { sub: user.id, role: role ?? "user", status: status ?? "pending" };
-    }
-  } catch {
-    // getSession() timed out — Supabase Auth is slow from this edge.
-    // Fall back to direct JWT decode for route guards.
-    session = getSessionFromCookie(request.cookies.getAll());
-  }
-
   const pathname = request.nextUrl.pathname;
   const isAuthPath = AUTH_PATHS.some((p) => pathname === p);
   const isProtected = [...USER_PATHS, ...ADMIN_PATHS, ...SUPER_ADMIN_PATHS].some(
     (p) =>
       p === "/" ? pathname === "/" : pathname === p || pathname.startsWith(p + "/"),
   );
+
+  // ── Session extraction ─────────────────────────────────────────────
+  // For auth pages (login, signup, etc.) we only need to know if the user
+  // is already signed in — a zero-network JWT decode from the cookie is
+  // instant and sufficient. Avoiding the full `getSession()` (which may
+  // trigger a network call to Supabase Auth) saves up to 800ms on login
+  // page loads — the primary entry point for mobile WebView users.
+  //
+  // For protected pages we still do the full session refresh (with the
+  // 800ms timeout safety net) so expired tokens get renewed.
+  let session: SessionClaims | null = null;
+
+  if (isAuthPath) {
+    // Fast path: instant cookie decode, no Supabase network call.
+    session = getSessionFromCookie(request.cookies.getAll());
+  } else if (isProtected) {
+    const supabase = createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
+      // Keep in sync with `createSupabaseServerClient()`
+      // (@/lib/supabase/server.ts).
+      cookieOptions: {
+        httpOnly: true,
+        secure: true,
+        sameSite: "lax",
+      },
+      cookies: {
+        getAll() {
+          return request.cookies.getAll();
+        },
+        setAll(cookiesToSet) {
+          cookiesToSet.forEach(({ name, value, options }) =>
+            response.cookies.set(name, value, options),
+          );
+        },
+      },
+    });
+
+    try {
+      const { data: { session: supabaseSession } } = await Promise.race([
+        supabase.auth.getSession(),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error("getSession timeout")), 800),
+        ),
+      ]);
+      const user = supabaseSession?.user ?? null;
+      if (user) {
+        const role = (user.user_metadata?.role as string | undefined) ?? null;
+        const status = (user.user_metadata?.status as string | undefined) ?? null;
+        session = { sub: user.id, role: role ?? "user", status: status ?? "pending" };
+      }
+    } catch {
+      // getSession() timed out — fall back to direct JWT decode.
+      session = getSessionFromCookie(request.cookies.getAll());
+    }
+  }
 
   // Logged in → redirect away from auth pages (only if approved).
   if (session && session.status === "approved" && isAuthPath) {
