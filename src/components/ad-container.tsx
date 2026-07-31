@@ -155,6 +155,9 @@ function AdModal({
   const dismiss = useAdStore((s) => s.dismiss);
   const [now, setNow] = useState(Date.now());
   const [showAdOverlay, setShowAdOverlay] = useState(false);
+  const [adLoadFailed, setAdLoadFailed] = useState(false);
+  const [iframeRetries, setIframeRetries] = useState(0);
+  const iframeKey = `${linkId}-${iframeRetries}`;
   const isNativeApp = typeof window !== "undefined" && !!(window as any).ReactNativeWebView;
 
   useEffect(() => {
@@ -286,13 +289,43 @@ function AdModal({
     };
   }, [linkId, startedAt, dismiss, markLoaded]);
 
+  // ── Listen for __embedframe messages from the proxied ad iframe ────
+  // The embed-frame proxy sends {__embedframe:'error'} on any fetch
+  // failure and {__embedframe:'rendered',hasContent:true} on success.
+  // This lets us detect blank/error iframes and retry or give up early
+  // instead of showing a black screen for the full ad-view duration.
+  useEffect(() => {
+    const handleEmbedFrameMsg = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      let data = event.data;
+      while (typeof data === "string") {
+        try { data = JSON.parse(data); } catch { break; }
+      }
+      if (!data || data.__embedframe !== "error") return;
+
+      // Proxy failed — retry once, then give up
+      setAdLoadFailed(true);
+      if (iframeRetries < 1) {
+        setIframeRetries((r) => r + 1);
+        setAdLoadFailed(false);
+      } else {
+        // Two failures — dismiss this ad slot early so the next queued
+        // ad can start immediately instead of waiting for the timer.
+        dismiss(linkId);
+      }
+    };
+    window.addEventListener("message", handleEmbedFrameMsg);
+    return () => window.removeEventListener("message", handleEmbedFrameMsg);
+  }, [linkId, iframeRetries, dismiss]);
+
   if (isNativeApp) {
     return null;
   }
 
   return (
     <>
-      {/* Compact bottom chip — always visible when ad is active */}
+      {/* Compact bottom chip — hidden when fullscreen overlay is active */}
+      {!showAdOverlay && (
       <div className="relative w-full overflow-hidden rounded-xl border border-border/50 bg-black shadow-2xl">
         <div className="flex items-center justify-between gap-1 border-b border-white/10 bg-zinc-950 px-2 py-1.5">
           <span className="text-[9px] font-black uppercase tracking-wide text-white/80">
@@ -359,6 +392,7 @@ function AdModal({
           </div>
         </div>
       </div>
+      )}
 
       {/* Fullscreen iframe overlay — shown when the ad is being viewed */}
       {showAdOverlay && startedAt > 0 && (
@@ -366,7 +400,9 @@ function AdModal({
           {/* Top bar with countdown and close */}
           <div className="flex items-center justify-between gap-2 bg-zinc-950 border-b border-white/10 px-3 py-2 shrink-0">
             <span className="text-xs font-black uppercase tracking-wide text-white/80">
-              {isOverdue
+              {adLoadFailed
+                ? "Ad load failed"
+                : isOverdue
                 ? "Completing..."
                 : isLoadingPhase
                 ? `Loading ad · ${loadingRemaining}s`
@@ -376,7 +412,7 @@ function AdModal({
               {/* Progress bar in header */}
               <div className="w-24 h-1.5 rounded-full bg-white/10 overflow-hidden">
                 <div
-                  className="h-full bg-accent transition-[width] duration-200 ease-linear"
+                  className={`h-full transition-[width] duration-200 ease-linear ${adLoadFailed ? 'bg-red-500' : 'bg-accent'}`}
                   style={{
                     width: `${Math.min(100, Math.max(0, (elapsedCapped / TOTAL_AD_SECONDS) * 100))}%`,
                   }}
@@ -392,15 +428,47 @@ function AdModal({
               </button>
             </div>
           </div>
-          
-          {/* Ad iframe — routed through /api/ad-serve proxy for header
->               enrichment (Referer, Origin, Sec-Fetch-*, GEO) → higher CPM */}
-          <iframe
-            src={`/api/ad-serve?url=${encodeURIComponent(url)}`}
-            className="flex-1 w-full border-0"
-            sandbox="allow-scripts allow-same-origin allow-popups"
-            title="Ad content"
-          />
+
+          {/* Ad iframe — fills remaining space below the top bar */}
+          <div className="relative flex-1 min-h-0 bg-black">
+            {adLoadFailed ? (
+              /* Error state with retry button */
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
+                <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-lg">
+                  &#9888;
+                </div>
+                <p className="text-white/70 text-xs max-w-[220px] leading-relaxed">
+                  The ad could not be loaded. Check your connection or ad-blocker settings.
+                </p>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAdLoadFailed(false);
+                    setIframeRetries((r) => r + 1);
+                  }}
+                  className="bg-accent text-white px-4 py-1.5 rounded-full font-bold text-[11px] hover:opacity-80 transition-opacity"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <iframe
+                key={iframeKey}
+                src={`/api/ad-serve?url=${encodeURIComponent(url)}`}
+                className="absolute inset-0 w-full h-full border-0"
+                sandbox="allow-scripts allow-same-origin allow-popups"
+                allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
+                title="Ad content"
+                onError={() => {
+                  if (iframeRetries < 1) {
+                    setIframeRetries((r) => r + 1);
+                  } else {
+                    setAdLoadFailed(true);
+                  }
+                }}
+              />
+            )}
+          </div>
         </div>
       )}
     </>

@@ -27,11 +27,33 @@ const MAX_REDIRECTS = 5;
 const MAX_SIZE = 5 * 1024 * 1024; // 5MB
 const PROXY_PATH = "/api/embed-frame";
 
-// Transparent body served on any proxy failure. It paints nothing (so the
-// embedding app's fallback card shows through) and reports "error" to the
-// parent so the app can flip to the fallback immediately instead of waiting
-// for the render-detection timeout.
-const ERROR_BODY = `<script>try{window.parent.postMessage({__embedframe:'error'},'*')}catch(e){}</script>`;
+// Visible fallback page served on any proxy failure. Shows a styled
+// "Ad could not load" message with a retry button so the user isn't left
+// staring at a black screen for the entire ad-view duration. Also reports
+// "error" to the parent so the app can dismiss the slot early.
+const ERROR_BODY = `<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{height:100%;background:#000;color:#fff;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif}
+  body{display:flex;align-items:center;justify-content:center;flex-direction:column;gap:16px;padding:24px;text-align:center}
+  .icon{width:48px;height:48px;border-radius:50%;background:rgba(255,255,255,0.08);display:flex;align-items:center;justify-content:center;font-size:22px}
+  h2{font-size:15px;font-weight:700;line-height:1.3}
+  p{font-size:12px;color:rgba(255,255,255,0.5);max-width:260px;line-height:1.5}
+  button{background:#6366f1;color:#fff;border:none;padding:10px 28px;border-radius:999px;font-size:13px;font-weight:700;cursor:pointer;transition:opacity .15s}
+  button:hover{opacity:.85}
+  button:active{opacity:.7}
+</style>
+<script>
+  try{window.parent.postMessage({__embedframe:'error'},'*')}catch(e){}
+  function retry(){window.location.reload()}
+</script>
+</head><body>
+  <div class="icon">&#9888;</div>
+  <h2>Ad could not load</h2>
+  <p>The ad server may be unreachable or blocked. Check your connection and ad-blocker settings.</p>
+  <button onclick="retry()">Retry</button>
+</body></html>`;
 
 function isDomainName(hostname: string): boolean {
   return /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}$/i.test(
@@ -427,22 +449,23 @@ export async function GET(request: NextRequest) {
     if (contentType.includes("text/html")) {
       let html = new TextDecoder().decode(bodyBuffer);
 
-      // Minimal frame-busting soften — heavy rewrites kill Adsterra players.
-      html = html.replace(/window\.top/g, "window.self");
-      html = html.replace(/\btop\.location\b/g, "window.self.location");
-      html = html.replace(/window\.parent/g, "window.self");
-      html = html.replace(/\bparent\.location\b/g, "window.self.location");
+	      // Frame-busting protection is now done via JS property overrides
+	      // in the injected <script> below (Object.defineProperty on
+	      // window.top / window.parent). This avoids corrupting JSON strings,
+	      // inline data attributes, and ad script logic that naively matches
+	      // window.top / window.parent inside string literals.
 
-      html = html.replace(/<meta[^>]+http-equiv=['"]?refresh['"]?[^>]*>/gi, (match) => {
+	      html = html.replace(/<meta[^>]+http-equiv=['"]?refresh['"]?[^>]*>/gi, (match) => {
         return match.replace(/(url=)(https?:\/\/[^"'>]+)/i, (_m, p1, p2) => {
           return `${p1}${PROXY_PATH}?url=${encodeURIComponent(p2)}`;
         });
       });
 
-      const baseTag = `<base href="${parsed.origin}/" />`;
-      const mediaBoost = `<meta name="viewport" content="width=device-width,initial-scale=1"/>
+	      const baseTag = `<base href="${parsed.origin}/" />`;
+	      const mediaBoost = `<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
 <style id="__embed-media">
-  html,body{margin:0!important;background:#000!important;min-height:100%!important}
+  html,body{margin:0!important;padding:0!important;background:#000!important;width:100%!important;height:100%!important;overflow:hidden!important}
+  img,embed,object,video,iframe{max-width:100%!important;max-height:100%!important;object-fit:contain!important}
   video,iframe[src*="video"],iframe[src*="ad"],iframe[src*="player"],iframe[id*="ad"],iframe[class*="ad"]{
     max-width:100%!important;width:100%!important;
   }
@@ -450,10 +473,29 @@ export async function GET(request: NextRequest) {
 </style>
 <script>
 (function(){
-  // Prevent SecurityError on history.pushState/replaceState when scripts upgrade protocol to https in local http dev
+  // ── Frame-busting protection (JS-level, not text-replace) ──────────
+  // Override window.top / window.parent via Object.defineProperty so ad
+  // scripts that try to break out of the iframe (popunders, redirects)
+  // are silently contained. We do this BEFORE any ad scripts run because
+  // this <script> is injected at the very start of <head>. Using
+  // defineProperty (configurable:true) prevents ad scripts from
+  // overriding our overrides, while still allowing them to read the
+  // values without throwing.
   try {
-    const wrapHistory = function(method) {
-      const original = window.history[method];
+    Object.defineProperty(window, 'top', {
+      get: function(){ return window.self; },
+      configurable: true
+    });
+    Object.defineProperty(window, 'parent', {
+      get: function(){ return window.self; },
+      configurable: true
+    });
+  } catch(e) {}
+
+  // ── Safe history.pushState / replaceState ──────────────────────────
+  try {
+    var wrapHistory = function(method) {
+      var original = window.history[method];
       if (original) {
         window.history[method] = function(state, title, url) {
           try {
@@ -468,9 +510,47 @@ export async function GET(request: NextRequest) {
     wrapHistory("replaceState");
   } catch (e) {}
 
+  // ── Content scaling ────────────────────────────────────────────────
+  // Measures the document's natural content size and applies a CSS
+  // transform to scale it up/down so it fills the viewport entirely.
+  function applyContentScale() {
+    try {
+      var docEl = document.documentElement;
+      var body = document.body;
+      if (!body) return;
+      // Reset any previous transform so we get accurate measurements
+      body.style.transform = '';
+      body.style.transformOrigin = '';
+      // Use scroll dimensions to capture the true content size
+      var contentW = Math.max(
+        body.scrollWidth, body.offsetWidth,
+        docEl.scrollWidth, docEl.clientWidth
+      );
+      var contentH = Math.max(
+        body.scrollHeight, body.offsetHeight,
+        docEl.scrollHeight, docEl.clientHeight
+      );
+      var viewW = window.innerWidth;
+      var viewH = window.innerHeight;
+      if (contentW <= 0 || contentH <= 0 || viewW <= 0 || viewH <= 0) return;
+      // Scale to fill (cover-style), preserving aspect ratio
+      var scaleX = viewW / contentW;
+      var scaleY = viewH / contentH;
+      var scale = Math.max(scaleX, scaleY);
+      // Don't scale if already nearly filling (within 5%)
+      if (scale > 0.95 && scale < 1.05) return;
+      body.style.transformOrigin = 'top left';
+      body.style.transform = 'scale(' + scale + ')';
+      // Adjust body dimensions so the scaled element still fits
+      body.style.width = (viewW / scale) + 'px';
+      body.style.height = (viewH / scale) + 'px';
+    } catch(e) {}
+  }
+
   function report(){
     try{window.parent.postMessage({__embedframe:'rendered',hasContent:true},'*')}catch(e){}
   }
+
   function boostVideos(){
     document.querySelectorAll('video').forEach(function(v){
       try{
@@ -490,21 +570,30 @@ export async function GET(request: NextRequest) {
         f.setAttribute('allowfullscreen','');
       }catch(e){}
     });
+    applyContentScale();
     report();
   }
+
   boostVideos();
   document.addEventListener('DOMContentLoaded', boostVideos);
-  window.addEventListener('load', boostVideos);
+  window.addEventListener('load', function(){
+    // Delay scaling slightly so late-rendered content is captured
+    setTimeout(applyContentScale, 600);
+    setTimeout(applyContentScale, 1500);
+    boostVideos();
+  });
   try{
-    new MutationObserver(boostVideos).observe(document.documentElement,{childList:true,subtree:true});
+    new MutationObserver(function(){
+      boostVideos();
+    }).observe(document.documentElement,{childList:true,subtree:true});
   }catch(e){}
   setInterval(boostVideos, 1500);
 
-  // Intercept form submissions and clicks to route through proxy, and proxy cookies!
+  // ── Click / form interception (route through proxy) ────────────────
   try {
-    const __proxyUrl = function(originalUrl) {
-      const u = new URL(originalUrl, document.baseURI || window.location.href);
-      const target = "${PROXY_PATH}?url=" + encodeURIComponent(u.toString());
+    var __proxyUrl = function(originalUrl) {
+      var u = new URL(originalUrl, document.baseURI || window.location.href);
+      var target = "${PROXY_PATH}?url=" + encodeURIComponent(u.toString());
       try {
         if (document.cookie) {
           return target + "&__c=" + encodeURIComponent(document.cookie);
@@ -513,15 +602,15 @@ export async function GET(request: NextRequest) {
       return target;
     };
 
-    const originalSubmit = HTMLFormElement.prototype.submit;
+    var originalSubmit = HTMLFormElement.prototype.submit;
     HTMLFormElement.prototype.submit = function() {
       try {
-        const method = (this.getAttribute('method') || 'get').toLowerCase();
-        const actionUrl = this.action || window.location.href;
-        const url = new URL(actionUrl, document.baseURI || window.location.href);
+        var method = (this.getAttribute('method') || 'get').toLowerCase();
+        var actionUrl = this.action || window.location.href;
+        var url = new URL(actionUrl, document.baseURI || window.location.href);
         if (method === 'get') {
-          const formData = new FormData(this);
-          formData.forEach((value, key) => { url.searchParams.set(key, value); });
+          var formData = new FormData(this);
+          formData.forEach(function(value, key) { url.searchParams.set(key, value); });
           window.self.location.href = __proxyUrl(url.toString());
           return;
         }
@@ -531,14 +620,14 @@ export async function GET(request: NextRequest) {
 
     document.addEventListener("submit", function(e) {
       try {
-        const form = e.target;
-        const method = (form.getAttribute('method') || 'get').toLowerCase();
+        var form = e.target;
+        var method = (form.getAttribute('method') || 'get').toLowerCase();
         if (method === 'get') {
           e.preventDefault();
-          const actionUrl = form.action || window.location.href;
-          const url = new URL(actionUrl, document.baseURI || window.location.href);
-          const formData = new FormData(form);
-          formData.forEach((value, key) => { url.searchParams.set(key, value); });
+          var actionUrl = form.action || window.location.href;
+          var url = new URL(actionUrl, document.baseURI || window.location.href);
+          var formData = new FormData(form);
+          formData.forEach(function(value, key) { url.searchParams.set(key, value); });
           window.self.location.href = __proxyUrl(url.toString());
         }
       } catch (err) {}
@@ -546,7 +635,7 @@ export async function GET(request: NextRequest) {
 
     document.addEventListener("click", function(e) {
       try {
-        const target = e.target.closest ? e.target.closest('a') : null;
+        var target = e.target.closest ? e.target.closest('a') : null;
         if (target && target.href && !target.href.startsWith('javascript:')) {
           e.preventDefault();
           window.self.location.href = __proxyUrl(target.href);
@@ -555,18 +644,27 @@ export async function GET(request: NextRequest) {
     }, true);
   } catch (e) {}
 
-  // Opaque-origin friendly storage stubs (Adsterra often touches these)
-  try{
-    var mem={_d:{},setItem:function(k,v){this._d[k]=String(v)},getItem:function(k){return this._d[k]||null},removeItem:function(k){delete this._d[k]},clear:function(){this._d={}},key:function(i){return Object.keys(this._d)[i]||null},get length(){return Object.keys(this._d).length}};
-    Object.defineProperty(window,'localStorage',{value:mem,configurable:true});
-    Object.defineProperty(window,'sessionStorage',{value:Object.assign({},mem,{_d:{}}),configurable:true});
-  }catch(e){}
+  // ── Storage: use real localStorage/sessionStorage when available ───
+  // The parent iframe has sandbox="allow-same-origin", so real storage
+  // works. Only fall back to in-memory stubs if the browser throws on
+  // access (e.g. opaque origin, third-party cookie blocking).
+  try {
+    var testKey = '__embed_test__';
+    var realLs = false, realSs = false;
+    try { window.localStorage.setItem(testKey, '1'); window.localStorage.removeItem(testKey); realLs = true; } catch(e) {}
+    try { window.sessionStorage.setItem(testKey, '1'); window.sessionStorage.removeItem(testKey); realSs = true; } catch(e) {}
+
+    if (!realLs) {
+      var memLs = {_d:{},setItem:function(k,v){this._d[k]=String(v)},getItem:function(k){return this._d[k]||null},removeItem:function(k){delete this._d[k]},clear:function(){this._d={}},key:function(i){return Object.keys(this._d)[i]||null},get length(){return Object.keys(this._d).length}};
+      Object.defineProperty(window,'localStorage',{value:memLs,configurable:true,writable:false});
+    }
+    if (!realSs) {
+      var memSs = {_d:{},setItem:function(k,v){this._d[k]=String(v)},getItem:function(k){return this._d[k]||null},removeItem:function(k){delete this._d[k]},clear:function(){this._d={}},key:function(i){return Object.keys(this._d)[i]||null},get length(){return Object.keys(this._d).length}};
+      Object.defineProperty(window,'sessionStorage',{value:memSs,configurable:true,writable:false});
+    }
+  } catch(e) {}
 
   // ── Kill malicious popup dialogs ───────────────────────────────────
-  // Malicious ad scripts abuse alert/confirm/prompt to show fake
-  // "file downloaded" / "bonus activated" dialogs that trick users into
-  // downloading unwanted APKs or subscribing to scams. Overriding these
-  // silently suppresses them without breaking the ad.
   try {
     window.alert = function(){};
     window.confirm = function(){ return false; };
