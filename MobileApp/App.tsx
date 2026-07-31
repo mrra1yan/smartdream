@@ -171,19 +171,13 @@ function App(): React.JSX.Element {
   // stale-ref bugs under React concurrent rendering.
   useEffect(() => { adsRef.current = ads; }, [ads]);
 
-  // ── Route native ad WebView requests through the embed-frame proxy ─
-  // The proxy (src/app/api/embed-frame) strips X-Frame-Options / CSP,
-  // enriches traffic-quality headers for higher CPM, and handles
-  // redirects server-side — preventing the "black screen" caused when
-  // an ad network 302-redirects to Play Store and our WebView blocks it.
-  function getProxiedAdUrl(adUrl: string): string {
-    try {
-      const base = new URL(webUrl);
-      return `${base.origin}/api/embed-frame?url=${encodeURIComponent(adUrl)}`;
-    } catch {
-      return `https://smart-dream-admin.vercel.app/api/embed-frame?url=${encodeURIComponent(adUrl)}`;
-    }
-  }
+	  // ── Load ad URLs directly (no proxy) ─────────────────────────────
+	  // Previously routed through /api/embed-frame proxy for header
+	  // enrichment, but Adsterra detects datacenter IPs (Vercel) and
+	  // returns blank pages. Loading directly uses the device's own IP.
+	  function getProxiedAdUrl(adUrl: string): string {
+	    return adUrl;
+	  }
 
   const networkErrorRef = useRef<boolean>(networkError);
   useEffect(() => {
@@ -559,8 +553,8 @@ function App(): React.JSX.Element {
                       // ── Block popups ────────────────────────────────────
                       window.open = function(){ return null; };
                       
-                      // ── Block ALL external redirects via location ────────
-                      // Only same-origin navigations are allowed (proxy content).
+                      // ── Block external redirects via location ────────
+                      // Only same-origin navigations are allowed (the ad's own origin).
                       // Any attempt to redirect to an external domain is silently dropped.
                       try {
                         var _loc = window.location;
@@ -614,17 +608,16 @@ function App(): React.JSX.Element {
                     true;
                   `}
                   onShouldStartLoadWithRequest={(req: any) => {
-                    // ── Strict navigation control ───────────────────────
-                    // Allow only our proxy domain (where /api/embed-frame lives).
-                    // Blocks: external http/https, intent://, market://, tel:, sms:, etc.
+                    // ── Ad WebView navigation ──────────────────────────
+                    // Allow the initial ad URL (any origin) and subsequent
+                    // navigations within the same page. Cross-origin
+                    // redirects are already blocked by the injected JS
+                    // (window.location override above).
                     const url = req.url;
                     if (!url || url === 'about:blank') return true;
-                    try {
-                      const parsed = new URL(url);
-                      const base = new URL(webUrl);
-                      if (parsed.origin === base.origin) return true;
-                    } catch (_) {}
-                    return false;
+                    // Block non-http schemes (intent://, market://, tel:, sms:, etc.)
+                    if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
+                    return true;
                   }}
                   setSupportMultipleWindows={false}
                   // Ad content is untrusted third-party. Lock cookies down
