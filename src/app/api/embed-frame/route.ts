@@ -644,10 +644,10 @@ export async function GET(request: NextRequest) {
     }, true);
   } catch (e) {}
 
-  // ── Storage: use real localStorage/sessionStorage when available ───
-  // The parent iframe has sandbox="allow-same-origin", so real storage
-  // works. Only fall back to in-memory stubs if the browser throws on
-  // access (e.g. opaque origin, third-party cookie blocking).
+	  // ── Storage: use real localStorage/sessionStorage when available ───
+	  // The parent iframe sandbox does NOT include allow-same-origin,
+	  // so the iframe is opaque-origin and real storage usually throws.
+	  // Test anyway and fall back to in-memory stubs if access fails.
   try {
     var testKey = '__embed_test__';
     var realLs = false, realSs = false;
