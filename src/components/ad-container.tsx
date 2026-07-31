@@ -454,7 +454,7 @@ function AdModal({
             ) : (
               <iframe
                 key={iframeKey}
-                src={`/api/ad-serve?url=${encodeURIComponent(url)}`}
+                src={url}
                 className="absolute inset-0 w-full h-full border-0"
                 sandbox="allow-scripts allow-popups"
                 allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
