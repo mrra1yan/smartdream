@@ -267,7 +267,11 @@ export async function login(
 
     // Role gate BEFORE verifying the password (same generic message as a bad
     // password — the old login-portal oracle protection).
-    if ((profile.role as Role) !== expectedRole) {
+    // super_admin can also log in through the admin login portal.
+    const roleOk =
+      (profile.role as Role) === expectedRole ||
+      (expectedRole === "admin" && (profile.role as Role) === "super_admin");
+    if (!roleOk) {
       console.log("[LOGIN] Role mismatch — profile role:", profile.role, "expected:", expectedRole);
       return { message: t("auth.errorInvalidCredentials") };
     }
