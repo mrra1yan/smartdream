@@ -3,6 +3,7 @@ import { LINK_COOLDOWN_HOURS } from "@/lib/types";
 import { getSettings } from "@/lib/settings";
 import { getEligibleFeedLinks } from "@/lib/repos/rpc";
 import { cacheGet, cacheSet } from "@/lib/redis";
+import { pool } from "@/lib/db";
 
 export type FeedLinkRow = {
   id: string;
@@ -18,6 +19,23 @@ export type FeedLinkRow = {
 // until the next fetch), so no explicit invalidation.
 const FEED_CACHE_TTL_SECONDS = 15;
 
+async function ensureFeedEligibilityCacheRefreshed() {
+  try {
+    const { rows } = await pool.query(
+      "SELECT MAX(refreshed_at) AS max_refreshed FROM feed_eligibility_cache"
+    );
+    const maxRefreshed = rows[0]?.max_refreshed;
+    const shouldRefresh = !maxRefreshed || (Date.now() - new Date(maxRefreshed).getTime() > 120_000);
+
+    if (shouldRefresh) {
+      console.log("[feed] Auto-refreshing feed eligibility cache...");
+      await pool.query("SELECT refresh_feed_eligibility_cache();");
+    }
+  } catch (err) {
+    console.error("[feed] Error auto-refreshing feed eligibility cache:", err);
+  }
+}
+
 export async function getFeed(
   viewerId: string,
   offset = 0,
@@ -26,6 +44,9 @@ export async function getFeed(
   const cacheKey = `feed:${viewerId}:${offset}`;
   const cached = await cacheGet<{ links: FeedLinkRow[]; nextOffset: number }>(cacheKey);
   if (cached) return cached;
+
+  // Auto-refresh the database eligibility cache if it is stale
+  await ensureFeedEligibilityCacheRefreshed();
 
   const settings = await getSettings();
 
