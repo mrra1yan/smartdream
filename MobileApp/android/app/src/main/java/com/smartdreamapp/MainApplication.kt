@@ -10,9 +10,11 @@ import com.facebook.react.defaults.DefaultReactHost.getDefaultReactHost
 class MainApplication : Application(), ReactApplication {
 
   override val reactHost: ReactHost by lazy {
+    val packages = PackageList(this).packages.toMutableList()
+    packages.add(PipPackage())
     getDefaultReactHost(
       context = applicationContext,
-      packageList = PackageList(this).packages,
+      packageList = packages,
     )
   }
 

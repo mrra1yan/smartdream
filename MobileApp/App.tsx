@@ -13,6 +13,8 @@ import {
   Linking,
   BackHandler,
   AppState,
+  DeviceEventEmitter,
+  NativeModules,
 } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import NetInfo from '@react-native-community/netinfo';
@@ -103,6 +105,7 @@ function App(): React.JSX.Element {
   const [networkError, setNetworkError] = useState<boolean>(false);
   const [webViewLoading, setWebViewLoading] = useState<boolean>(true);
   const retryCountRef = useRef<number>(0);
+  const [isInPiP, setIsInPiP] = useState<boolean>(false);
 
   // ── Safety timeout for loading spinner ──────────────────────────────
   // Guarantees the loading spinner disappears after 6 seconds even if
@@ -224,6 +227,27 @@ function App(): React.JSX.Element {
       netInfoSub();
     };
   }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'android') {
+      const subscription = DeviceEventEmitter.addListener('onPiPModeChanged', (event: any) => {
+        setIsInPiP(event.isInPiP);
+      });
+      return () => {
+        subscription.remove();
+      };
+    }
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'android' && NativeModules.PipModule) {
+      try {
+        NativeModules.PipModule.setPiPEnabled(ads.length > 0);
+      } catch (e) {
+        console.log('Error setting PiP enabled:', e);
+      }
+    }
+  }, [ads]);
 
   useEffect(() => {
     // Keep WebView timers alive in the background.
@@ -386,9 +410,6 @@ function App(): React.JSX.Element {
           setAds(valid);
         }
       } else if (data.type === 'CLEAR_CACHE') {
-        // Drop any floating ad WebViews too -- they belong to the web
-        // layer's ad-store state, which is about to be wiped by the reload
-        // below, so leaving them mounted would orphan them.
         setAds([]);
         if (mainWebViewRef.current) {
           mainWebViewRef.current.clearCache(true);
@@ -406,350 +427,262 @@ function App(): React.JSX.Element {
     setAds((prev) => prev.filter((a) => a.linkId !== linkId));
   };
 
+  const renderAdWebView = (ad: AdInfo | null) => {
+    return (
+      <WebViewComponent
+        source={{ uri: ad ? getProxiedAdUrl(ad.url) : 'about:blank' }}
+        style={styles.floatingWebView}
+        onLoadEnd={() => { if (ad) dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId }) }}
+        onError={(syntheticEvent: any) => {
+          const { nativeEvent } = syntheticEvent;
+          console.log('Ad WebView error:', nativeEvent);
+        }}
+        onHttpError={(syntheticEvent: any) => {
+          const { nativeEvent } = syntheticEvent;
+          console.log('Ad WebView HTTP error:', nativeEvent.statusCode);
+        }}
+        allowsInlineMediaPlayback
+        mediaPlaybackRequiresUserAction={false}
+        javaScriptEnabled
+        domStorageEnabled
+        userAgent="Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
+        injectedJavaScriptBeforeContentLoaded={`
+          (function(){
+            window.alert = function(){};
+            window.confirm = function(){ return false; };
+            window.prompt = function(){ return null; };
+            window.open = function(){ return null; };
+            try {
+              var _origDefineProperty = Object.defineProperty;
+              Object.defineProperty = function(obj, prop, desc) {
+                if (obj === window && (prop === 'open' || prop === 'location')) {
+                  return obj;
+                }
+                return _origDefineProperty.call(Object, obj, prop, desc);
+              };
+            } catch(e) {}
+            try {
+              document.write = function(){};
+              Document.prototype.write = function(){};
+            } catch(e) {}
+          })();
+          true;
+        `}
+        injectedJavaScript={`
+          (function(){
+            window.alert = function(){};
+            window.confirm = function(){ return false; };
+            window.prompt = function(){ return null; };
+            window.open = function(){ return null; };
+            try {
+              Object.defineProperty(window, 'top', {
+                get: function(){ return window.self; },
+                configurable: true
+              });
+              Object.defineProperty(window, 'parent', {
+                get: function(){ return window.self; },
+                configurable: true
+              });
+            } catch(e) {}
+            document.addEventListener('submit', function(e) {
+              e.preventDefault();
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+            }, true);
+            var muteAll = function() {
+              var v = document.getElementsByTagName('video');
+              for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
+              var a = document.getElementsByTagName('audio');
+              for(var i=0; i<a.length; i++) { a[i].muted = true; a[i].volume = 0; }
+            };
+            muteAll();
+            setInterval(muteAll, 1000);
+            document.addEventListener('click', function(e) {
+              var target = e.target;
+              while (target && target.tagName !== 'A') {
+                target = target.parentNode;
+              }
+              if (target) {
+                var href = (target.href || '').toLowerCase();
+                if (target.hasAttribute('download') || href.includes('.apk') || href.startsWith('blob:')) {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  e.stopImmediatePropagation();
+                }
+              }
+            }, true);
+            try {
+              var _observer = new MutationObserver(function(mutations) {
+                for (var m = 0; m < mutations.length; m++) {
+                  var nodes = mutations[m].addedNodes;
+                  for (var n = 0; n < nodes.length; n++) {
+                    var node = nodes[n];
+                    if (node.nodeType !== 1) continue;
+                    if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
+                      try { node.remove(); } catch(_) {}
+                      continue;
+                    }
+                    if (node.tagName === 'OBJECT' || node.tagName === 'EMBED') {
+                      try { node.remove(); } catch(_) {}
+                      continue;
+                    }
+                    if (node.tagName === 'A') {
+                      var h = (node.href || '').toLowerCase();
+                      if (node.hasAttribute('download') || h.includes('.apk')) {
+                        try { node.remove(); } catch(_) {}
+                      }
+                    }
+                  }
+                }
+              });
+              _observer.observe(document.documentElement, { childList: true, subtree: true });
+            } catch(e) {}
+            window.addEventListener('beforeunload', function(e) {
+              e.stopPropagation();
+              e.stopImmediatePropagation();
+            }, true);
+          })();
+          true;
+        `}
+        onShouldStartLoadWithRequest={(req: any) => {
+          const url = req.url;
+          if (!url || url === 'about:blank') return true;
+          if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
+          var lower = url.toLowerCase();
+          if (lower.includes('play.google.com') || lower.includes('market://') || lower.includes('intent://') || lower.includes('.apk') || lower.includes('download=') || lower.includes('force-download') || lower.includes('redirect=') || lower.includes('redirect_url=')) return false;
+          return true;
+        }}
+        setSupportMultipleWindows={false}
+        sharedCookiesEnabled={false}
+        thirdPartyCookiesEnabled={true}
+        cacheEnabled={true}
+        androidLayerType="hardware"
+      />
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container}>
-      <StatusBar barStyle="light-content" backgroundColor="#000" />
-      <View style={[styles.innerContainer, { paddingTop: Platform.OS === 'android' ? (StatusBar.currentHeight ?? 24) : 0 }]}>
+      <StatusBar barStyle="light-content" backgroundColor="#000" hidden={isInPiP} />
+      <View style={[
+        styles.innerContainer, 
+        { paddingTop: Platform.OS === 'android' && !isInPiP ? (StatusBar.currentHeight ?? 24) : 0 }
+      ]}>
 
-        {/* Main WebView */}
-        <WebViewComponent
-          ref={mainWebViewRef}
-          source={{ uri: webUrl }}
-          style={styles.mainWebView}
-          onMessage={onMainMessage}
-          onLoadStart={() => setWebViewLoading(true)}
-          onLoad={() => setWebViewLoading(false)}
-          onLoadEnd={() => {
-            // Successful load → clear any prior error state and reset
-            // the retry counter so transient blips don't accumulate
-            // across unrelated load cycles.
-            setWebViewLoading(false);
-            setNetworkError(false);
-            retryCountRef.current = 0;
-            dispatchToWeb({ type: 'BRIDGE_INIT' });
-          }}
-          onLoadProgress={(syntheticEvent: any) => {
-            // Hide spinner early when page is 75%+ loaded.
-            // Bypasses permanent spinner hangs caused by slow background scripts.
-            const progress = syntheticEvent?.nativeEvent?.progress;
-            if (typeof progress === 'number' && progress > 0.75) {
+        {/* Main WebView Container */}
+        <View style={[
+          styles.mainWebViewContainer,
+          isInPiP && styles.hiddenMainWebView
+        ]}>
+          <WebViewComponent
+            ref={mainWebViewRef}
+            source={{ uri: webUrl }}
+            style={styles.mainWebView}
+            onMessage={onMainMessage}
+            onLoadStart={() => setWebViewLoading(true)}
+            onLoad={() => setWebViewLoading(false)}
+            onLoadEnd={() => {
               setWebViewLoading(false);
-            }
-          }}
-          allowsInlineMediaPlayback
-          mediaPlaybackRequiresUserAction={false}
-          cacheEnabled={true}
-          javaScriptEnabled={true}
-          domStorageEnabled={true}
-          sharedCookiesEnabled={true}
-          thirdPartyCookiesEnabled={true}
-          injectedJavaScript={`
-            (function() {
-              try {
-                var AudioContext = window.AudioContext || window.webkitAudioContext;
-                if (AudioContext) {
-                  var ctx = new AudioContext();
-                  var oscillator = ctx.createOscillator();
-                  var gainNode = ctx.createGain();
-                  gainNode.gain.value = 0.0001; // virtually silent
-                  oscillator.connect(gainNode);
-                  gainNode.connect(ctx.destination);
-                  oscillator.start();
-                }
-              } catch(e) {}
-            })();
-            true;
-          `}
-          androidLayerType="hardware"
-          onShouldStartLoadWithRequest={(req: any) => {
-            // Only allow the trusted web host — blocks redirects to
-            // external domains that could steal session cookies
-            // (sharedCookiesEnabled=true on this WebView).
-            const url = req.url;
-            if (!url) return true;
-            return isAllowedHost(url, ALLOWED_WEB_HOSTS) || url.startsWith('about:');
-          }}
-          onError={() => handleWebViewError()}
-          onHttpError={(syntheticEvent: any) => {
-            const statusCode = syntheticEvent?.nativeEvent?.statusCode;
-            if (typeof statusCode === 'number' && statusCode >= 500) {
-              handleWebViewError();
-            }
-          }}
-        />
+              setNetworkError(false);
+              retryCountRef.current = 0;
+              dispatchToWeb({ type: 'BRIDGE_INIT' });
+            }}
+            onLoadProgress={(syntheticEvent: any) => {
+              const progress = syntheticEvent?.nativeEvent?.progress;
+              if (typeof progress === 'number' && progress > 0.75) {
+                setWebViewLoading(false);
+              }
+            }}
+            allowsInlineMediaPlayback
+            mediaPlaybackRequiresUserAction={false}
+            cacheEnabled={true}
+            javaScriptEnabled={true}
+            domStorageEnabled={true}
+            sharedCookiesEnabled={true}
+            thirdPartyCookiesEnabled={true}
+            injectedJavaScript={`
+              (function() {
+                try {
+                  var AudioContext = window.AudioContext || window.webkitAudioContext;
+                  if (AudioContext) {
+                    var ctx = new AudioContext();
+                    var oscillator = ctx.createOscillator();
+                    var gainNode = ctx.createGain();
+                    gainNode.gain.value = 0.0001; // virtually silent
+                    oscillator.connect(gainNode);
+                    gainNode.connect(ctx.destination);
+                    oscillator.start();
+                  }
+                } catch(e) {}
+              })();
+              true;
+            `}
+            androidLayerType="hardware"
+            onShouldStartLoadWithRequest={(req: any) => {
+              const url = req.url;
+              if (!url) return true;
+              return isAllowedHost(url, ALLOWED_WEB_HOSTS) || url.startsWith('about:');
+            }}
+            onError={() => handleWebViewError()}
+            onHttpError={(syntheticEvent: any) => {
+              const statusCode = syntheticEvent?.nativeEvent?.statusCode;
+              if (typeof statusCode === 'number' && statusCode >= 500) {
+                handleWebViewError();
+              }
+            }}
+          />
+        </View>
 
         {/* Custom Loading Overlay */}
-        {webViewLoading && (
+        {webViewLoading && !isInPiP && (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color="#a855f7" />
             <Text style={styles.loadingText}>Smart Dream...</Text>
           </View>
         )}
 
-        {/* Floating Container for Multiple Ads at the bottom */}
-        <View style={[styles.adsWrapper, ads.length === 0 && { display: 'none' }]}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.scrollContent}
-            bounces={false}
-            overScrollMode="never"
-          >
-            {[0, 1, 2].map((index) => {
-              const ad = ads[index] || null;
-
-              return (
-              <View key={`ad-slot-${index}`} style={[
-                styles.floatingAdContainer, 
-                !ad && { display: 'none' }
-              ]}>
-                <View style={styles.adHeader}>
-                  <Text style={styles.adTitle}>Ad is active</Text>
-                  <TouchableOpacity onPress={() => ad && closeAdManually(ad.linkId)} style={styles.closeBtn}>
-                    <Text style={styles.closeBtnText}>X</Text>
-                  </TouchableOpacity>
+        {/* Floating Container for Multiple Ads / Full screen in PiP */}
+        <View style={[
+          styles.adsWrapper, 
+          ads.length === 0 && { display: 'none' },
+          isInPiP && styles.pipAdsWrapper
+        ]}>
+          {isInPiP ? (
+            <View style={styles.pipAdsRow}>
+              {ads.slice(0, 3).map((ad, index) => (
+                <View key={`pip-ad-${index}`} style={styles.pipAdSlot}>
+                  {renderAdWebView(ad)}
                 </View>
-                <WebViewComponent
-                  source={{ uri: ad ? getProxiedAdUrl(ad.url) : 'about:blank' }}
-                  style={styles.floatingWebView}
-                  onLoadEnd={() => { if (ad) dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId }) }}
-                  onError={(syntheticEvent: any) => {
-                    const { nativeEvent } = syntheticEvent;
-                    console.log('Ad WebView error:', nativeEvent);
-                  }}
-                  onHttpError={(syntheticEvent: any) => {
-                    const { nativeEvent } = syntheticEvent;
-                    console.log('Ad WebView HTTP error:', nativeEvent.statusCode);
-                  }}
-                  allowsInlineMediaPlayback
-                  mediaPlaybackRequiresUserAction={false}
-                  javaScriptEnabled
-                  domStorageEnabled
-                  // ── Chrome Mobile user-agent ──────────────────────────
-                  // Default WebView UA includes app identifiers that ad
-                  // networks flag as "in-app traffic" → lower CPM. A clean
-                  // Chrome UA signals standard mobile browser traffic.
-                  userAgent="Mozilla/5.0 (Linux; Android 14; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36"
-                  // ── Block malicious popups & downloads ─────────────────
-                  // Override alert/confirm/prompt — malicious ad scripts use
-                  // these to show fake "file downloaded" dialogs.
-                  injectedJavaScriptBeforeContentLoaded={`
-                    (function(){
-                      // ── ⚠️ CRITICAL: runs BEFORE any ad script can execute ──
-                      // Must neutralize dangerous APIs here — if ad scripts
-                      // grab references before injectedJavaScript runs, they
-                      // can bypass post-load overrides.
+              ))}
+            </View>
+          ) : (
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.scrollContent}
+              bounces={false}
+              overScrollMode="never"
+            >
+              {[0, 1, 2].map((index) => {
+                const ad = ads[index] || null;
 
-                      // ── Disable dialogs ──────────────────────────────────
-                      window.alert = function(){};
-                      window.confirm = function(){ return false; };
-                      window.prompt = function(){ return null; };
-
-                      // ── Block popups (moved here to close timing race) ──
-                      window.open = function(){ return null; };
-
-                      // ── Protect against defineProperty restores ──────────
-                      // Ad scripts may try Object.defineProperty(window,'open',...)
-                      // to restore the original window.open. Block that.
-                      try {
-                        var _origDefineProperty = Object.defineProperty;
-                        Object.defineProperty = function(obj, prop, desc) {
-                          if (obj === window && (prop === 'open' || prop === 'location')) {
-                            return obj;
-                          }
-                          return _origDefineProperty.call(Object, obj, prop, desc);
-                        };
-                      } catch(e) {}
-
-                      // ── Neutralise document.write ────────────────────────
-                      // Ad scripts use document.write to replace the entire page
-                      // with a redirect/download page.
-                      try {
-                        document.write = function(){};
-                        Document.prototype.write = function(){};
-                      } catch(e) {}
-                    })();
-                    true;
-                  `}
-                  injectedJavaScript={`
-                    (function(){
-                      // ── Disable dialogs (redundant belt-and-suspenders) ───
-                      window.alert = function(){};
-                      window.confirm = function(){ return false; };
-                      window.prompt = function(){ return null; };
-
-                      // ── Block popups (redundant) ─────────────────────────
-                      window.open = function(){ return null; };
-
-                      // ── Block external redirects via window.location ─────
-                      // Only same-origin navigations are allowed.
-                      try {
-                        var _loc = window.location;
-                        var _origin = window.location.origin;
-                        Object.defineProperty(window, 'location', {
-                          get: function(){ return _loc; },
-                          set: function(v) {
-                            try {
-                              if (new URL(String(v), _loc.href).origin === _origin) {
-                                _loc.href = v;
-                              }
-                            } catch(_) {}
-                          }
-                        });
-                        _loc.assign = function(){};
-                        _loc.replace = function(){};
-                      } catch(e) {}
-
-                      // ── Block document.location bypass ───────────────────
-                      try {
-                        var _dloc = document.location;
-                        Object.defineProperty(document, 'location', {
-                          get: function(){ return _dloc; },
-                          set: function(v) {
-                            try {
-                              if (new URL(String(v), _dloc.href).origin === _origin) {
-                                _dloc.href = v;
-                              }
-                            } catch(_) {}
-                          }
-                        });
-                        if (_dloc.assign) _dloc.assign = function(){};
-                        if (_dloc.replace) _dloc.replace = function(){};
-                      } catch(e) {}
-
-                      // ── Block top.location redirects ─────────────────────
-                      // top !== self in iframes — ad scripts set top.location
-                      // to redirect the entire WebView.
-                      try {
-                        Object.defineProperty(window, 'top', {
-                          get: function(){ return window.self; },
-                          configurable: true
-                        });
-                        Object.defineProperty(window, 'parent', {
-                          get: function(){ return window.self; },
-                          configurable: true
-                        });
-                      } catch(e) {}
-
-                      // ── Block form submissions (hidden-form malware) ────
-                      document.addEventListener('submit', function(e) {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        e.stopImmediatePropagation();
-                      }, true);
-
-                      // ── Mute all audio/video ────────────────────────────
-                      var muteAll = function() {
-                        var v = document.getElementsByTagName('video');
-                        for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
-                        var a = document.getElementsByTagName('audio');
-                        for(var i=0; i<a.length; i++) { a[i].muted = true; a[i].volume = 0; }
-                      };
-                      muteAll();
-                      setInterval(muteAll, 1000);
-
-                      // ── Block APK downloads and blob: URLs ──────────────
-                      document.addEventListener('click', function(e) {
-                        var target = e.target;
-                        while (target && target.tagName !== 'A') {
-                          target = target.parentNode;
-                        }
-                        if (target) {
-                          var href = (target.href || '').toLowerCase();
-                          if (target.hasAttribute('download') || href.includes('.apk') || href.startsWith('blob:')) {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            e.stopImmediatePropagation();
-                          }
-                        }
-                      }, true);
-
-                      // ── MutationObserver: kill injected popups/iframes ──
-                      // Some ad scripts inject elements dynamically after load
-                      // (hidden iframes, overlay divs with download links).
-                      try {
-                        var _observer = new MutationObserver(function(mutations) {
-                          for (var m = 0; m < mutations.length; m++) {
-                            var nodes = mutations[m].addedNodes;
-                            for (var n = 0; n < nodes.length; n++) {
-                              var node = nodes[n];
-                              if (node.nodeType !== 1) continue;
-                              // Remove injected iframes (popup/redirect vehicles)
-                              if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
-                                try { node.remove(); } catch(_) {}
-                                continue;
-                              }
-                              // Remove injected objects/embeds (drive-by downloads)
-                              if (node.tagName === 'OBJECT' || node.tagName === 'EMBED') {
-                                try { node.remove(); } catch(_) {}
-                                continue;
-                              }
-                              // Remove links with download attributes or .apk hrefs
-                              if (node.tagName === 'A') {
-                                var h = (node.href || '').toLowerCase();
-                                if (node.hasAttribute('download') || h.includes('.apk')) {
-                                  try { node.remove(); } catch(_) {}
-                                }
-                              }
-                            }
-                          }
-                        });
-                        _observer.observe(document.documentElement, { childList: true, subtree: true });
-                      } catch(e) {}
-
-                      // ── Block beforeunload navigation traps ──────────────
-                      // Ad scripts can set onbeforeunload to show fake "leave?"
-                      // dialogs or redirect to Play Store via beforeunload.
-                      // Note: do NOT call e.preventDefault() — that triggers
-                      // the browser's native "leave site?" dialog.
-                      window.addEventListener('beforeunload', function(e) {
-                        e.stopPropagation();
-                        e.stopImmediatePropagation();
-                      }, true);
-                    })();
-                    true;
-                  `}
-                  onShouldStartLoadWithRequest={(req: any) => {
-                    // ── Ad WebView navigation ──────────────────────────
-                    // Layer 1: Allow the initial ad URL and same-origin nav.
-                    // Layer 2: Block cross-origin redirects that bypassed JS.
-                    const url = req.url;
-                    if (!url || url === 'about:blank') return true;
-
-                    // Block non-http schemes (intent://, market://, tel:, sms:, …)
-                    if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
-
-                    // Block known malicious patterns even if JS bypassed
-                    var lower = url.toLowerCase();
-                    // Play Store / app stores
-                    if (lower.includes('play.google.com')) return false;
-                    if (lower.includes('market://')) return false;
-                    if (lower.includes('intent://')) return false;
-                    // APK direct downloads
-                    if (lower.includes('.apk')) return false;
-                    // Download-trigger params
-                    if (lower.includes('download=') || lower.includes('force-download')) return false;
-                    // Drive-by / tracking redirects
-                    if (lower.includes('redirect=') || lower.includes('redirect_url=')) return false;
-
-                    return true;
-                  }}
-                  setSupportMultipleWindows={false}
-                  // Ad content is untrusted third-party. Lock cookies down
-                  // on this WebView specifically (per-instance prop, does
-                  // not affect the main WebView above) so the app's own
-                  // session cookie can never leak into ad content.
-                  // thirdPartyCookiesEnabled=true lets ad networks set THEIR
-                  // own tracking cookies — needed for impression counting & CPM.
-                  sharedCookiesEnabled={false}
-                  thirdPartyCookiesEnabled={true}
-                  cacheEnabled={true}
-                  androidLayerType="hardware"
-                />
-              </View>
-              );
-            })}
-          </ScrollView>
+                return (
+                <View key={`ad-slot-${index}`} style={[
+                  styles.floatingAdContainer, 
+                  !ad && { display: 'none' }
+                ]}>
+                  <View style={styles.adHeader}>
+                    <Text style={styles.adTitle}>Ad is active</Text>
+                    <TouchableOpacity onPress={() => ad && closeAdManually(ad.linkId)} style={styles.closeBtn}>
+                      <Text style={styles.closeBtnText}>X</Text>
+                    </TouchableOpacity>
+                  </View>
+                  {renderAdWebView(ad)}
+                </View>
+                );
+              })}
+            </ScrollView>
+          )}
         </View>
       </View>
 
@@ -811,6 +744,45 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: '#000',
+  },
+  pipContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  pipAdsWrapper: {
+    position: 'relative',
+    flex: 1,
+    height: '100%',
+    width: '100%',
+    backgroundColor: '#000',
+    padding: 2,
+    zIndex: 20,
+  },
+  pipAdsRow: {
+    flexDirection: 'row',
+    width: '100%',
+    height: '100%',
+    gap: 2,
+  },
+  pipAdSlot: {
+    flex: 1,
+    height: '100%',
+    backgroundColor: '#1e1e1e',
+    borderRadius: 4,
+    overflow: 'hidden',
+    borderColor: '#333',
+    borderWidth: 0.5,
+  },
+  mainWebViewContainer: {
+    flex: 1,
+  },
+  hiddenMainWebView: {
+    position: 'absolute',
+    width: 0,
+    height: 0,
+    opacity: 0,
   },
   innerContainer: {
     flex: 1,

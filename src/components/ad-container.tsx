@@ -155,9 +155,6 @@ function AdModal({
   const dismiss = useAdStore((s) => s.dismiss);
   const [now, setNow] = useState(Date.now());
   const [showAdOverlay, setShowAdOverlay] = useState(false);
-  const [adLoadFailed, setAdLoadFailed] = useState(false);
-  const [iframeRetries, setIframeRetries] = useState(0);
-  const iframeKey = `${linkId}-${iframeRetries}`;
   const isNativeApp = typeof window !== "undefined" && !!(window as any).ReactNativeWebView;
 
   useEffect(() => {
@@ -174,7 +171,6 @@ function AdModal({
   
   const loadingRemaining = Math.max(0, AD_LOADING_SECONDS - elapsedCapped);
   const viewRemaining = Math.max(0, AD_VIEW_SECONDS - (elapsedCapped - AD_LOADING_SECONDS));
-  const totalRemaining = Math.max(0, TOTAL_AD_SECONDS - elapsedCapped);
 
   const handleOpenAd = useCallback(() => {
     if (typeof window !== "undefined" && (window as any).ReactNativeWebView) {
@@ -194,9 +190,12 @@ function AdModal({
       return true;
     }
 
-    // Browser: use inline iframe overlay instead of popup (popup blockers
-    // kill auto-like since there's no user gesture).  Same as the native
-    // path: start the timer immediately — the ad loads in the overlay.
+    // Browser: Open ad in a new tab/window to bypass iframe X-Frame-Options/CSP restrictions
+    try {
+      window.open(url, "_blank");
+    } catch (e) {
+      console.error("Popup blocked:", e);
+    }
     setShowAdOverlay(true);
     if (startedAt === 0) {
       markLoaded(linkId);
@@ -289,34 +288,7 @@ function AdModal({
     };
   }, [linkId, startedAt, dismiss, markLoaded]);
 
-  // ── Listen for __embedframe messages from the proxied ad iframe ────
-  // The embed-frame proxy sends {__embedframe:'error'} on any fetch
-  // failure and {__embedframe:'rendered',hasContent:true} on success.
-  // This lets us detect blank/error iframes and retry or give up early
-  // instead of showing a black screen for the full ad-view duration.
-  useEffect(() => {
-    const handleEmbedFrameMsg = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
-      let data = event.data;
-      while (typeof data === "string") {
-        try { data = JSON.parse(data); } catch { break; }
-      }
-      if (!data || data.__embedframe !== "error") return;
 
-      // Proxy failed — retry once, then give up
-      setAdLoadFailed(true);
-      if (iframeRetries < 1) {
-        setIframeRetries((r) => r + 1);
-        setAdLoadFailed(false);
-      } else {
-        // Two failures — dismiss this ad slot early so the next queued
-        // ad can start immediately instead of waiting for the timer.
-        dismiss(linkId);
-      }
-    };
-    window.addEventListener("message", handleEmbedFrameMsg);
-    return () => window.removeEventListener("message", handleEmbedFrameMsg);
-  }, [linkId, iframeRetries, dismiss]);
 
   if (isNativeApp) {
     return null;
@@ -400,9 +372,7 @@ function AdModal({
           {/* Top bar with countdown and close */}
           <div className="flex items-center justify-between gap-2 bg-zinc-950 border-b border-white/10 px-3 py-2 shrink-0">
             <span className="text-xs font-black uppercase tracking-wide text-white/80">
-              {adLoadFailed
-                ? "Ad load failed"
-                : isOverdue
+              {isOverdue
                 ? "Completing..."
                 : isLoadingPhase
                 ? `Loading ad · ${loadingRemaining}s`
@@ -412,7 +382,7 @@ function AdModal({
               {/* Progress bar in header */}
               <div className="w-24 h-1.5 rounded-full bg-white/10 overflow-hidden">
                 <div
-                  className={`h-full transition-[width] duration-200 ease-linear ${adLoadFailed ? 'bg-red-500' : 'bg-accent'}`}
+                  className="h-full transition-[width] duration-200 ease-linear bg-accent"
                   style={{
                     width: `${Math.min(100, Math.max(0, (elapsedCapped / TOTAL_AD_SECONDS) * 100))}%`,
                   }}
@@ -430,44 +400,34 @@ function AdModal({
           </div>
 
           {/* Ad iframe — fills remaining space below the top bar */}
-          <div className="relative flex-1 min-h-0 bg-black">
-            {adLoadFailed ? (
-              /* Error state with retry button */
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 p-6 text-center">
-                <div className="w-10 h-10 rounded-full bg-white/10 flex items-center justify-center text-lg">
-                  &#9888;
-                </div>
-                <p className="text-white/70 text-xs max-w-[220px] leading-relaxed">
-                  The ad could not be loaded. Check your connection or ad-blocker settings.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setAdLoadFailed(false);
-                    setIframeRetries((r) => r + 1);
-                  }}
-                  className="bg-accent text-white px-4 py-1.5 rounded-full font-bold text-[11px] hover:opacity-80 transition-opacity"
-                >
-                  Retry
-                </button>
+          <div className="relative flex-1 min-h-0 bg-black flex items-center justify-center">
+            {/* Show detailed premium instruction screen instead of a blocked iframe */}
+            <div className="w-full max-w-md p-8 rounded-3xl border border-white/10 bg-zinc-900/60 backdrop-blur-md shadow-2xl flex flex-col items-center gap-5 text-center mx-4">
+              <div className="relative flex h-16 w-16 items-center justify-center rounded-2xl bg-accent/15 border border-accent/30 text-accent">
+                <span className="text-2xl animate-pulse">🔗</span>
               </div>
-            ) : (
-              <iframe
-                key={iframeKey}
-                src={url}
-                className="absolute inset-0 w-full h-full border-0"
-                sandbox="allow-scripts allow-popups"
-                allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-                title="Ad content"
-                onError={() => {
-                  if (iframeRetries < 1) {
-                    setIframeRetries((r) => r + 1);
-                  } else {
-                    setAdLoadFailed(true);
+              <div>
+                <h3 className="text-base font-black text-white mb-2">
+                  Ad-টি নতুন উইন্ডোতে ওপেন হয়েছে
+                </h3>
+                <p className="text-xs text-zinc-400 max-w-[280px] leading-relaxed">
+                  নতুন উইন্ডো/ট্যাবটি বন্ধ করবেন না। countdown শেষ হওয়া পর্যন্ত অপেক্ষা করুন।
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  try {
+                    window.open(url, "_blank");
+                  } catch (e) {
+                    console.error("Popup blocked:", e);
                   }
                 }}
-              />
-            )}
+                className="w-full rounded-2xl bg-accent text-white font-extrabold text-xs py-3.5 shadow-md shadow-accent/20 hover:scale-[1.02] active:scale-[0.98] transition-transform cursor-pointer"
+              >
+                Reopen Ad (আবার ওপেন করুন)
+              </button>
+            </div>
           </div>
         </div>
       )}
