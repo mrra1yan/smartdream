@@ -2,9 +2,13 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useAdStore } from "@/lib/ad-store";
-import { MAX_CONCURRENT_ADS } from "@/lib/types";
+import { MAX_CONCURRENT_ADS, LINK_COOLDOWN_HOURS } from "@/lib/types";
 
 type FeedLink = { id: string; url: string };
+
+/** Entries older than this are auto-purged from seenRef so links that have
+ *  passed their 12 h cooldown can be re-fetched and re-liked. */
+const SEEN_TTL_MS = LINK_COOLDOWN_HOURS * 60 * 60 * 1000; // 12 h
 
 type Status = {
   paidEnabled?: boolean;
@@ -33,7 +37,9 @@ export function useAutoLike() {
 
   const runningRef = useRef(false);
   const exhaustedRef = useRef(false);
-  const seenRef = useRef<Set<string>>(new Set());
+  /** Map<linkId, addedAtMs> — entries older than SEEN_TTL_MS (12 h) are
+   *  auto-purged so auto-like can re-fetch links whose cooldown has expired. */
+  const seenRef = useRef<Map<string, number>>(new Map());
   const enqueuedRef = useRef<Set<string>>(new Set());
   const failedRef = useRef(0);
   const likedCountRef = useRef(0);
@@ -62,18 +68,21 @@ export function useAutoLike() {
     }
   }, []);
 
+  // Purge entries older than 12 h so cooldown-expired links can re-surface.
+  const purgeExpiredSeen = useCallback(() => {
+    const now = Date.now();
+    const map = seenRef.current;
+    for (const [id, ts] of map) {
+      if (now - ts > SEEN_TTL_MS) map.delete(id);
+    }
+  }, []);
+
   const fetchBatch = useCallback(async (): Promise<FeedLink[]> => {
     try {
-      // offsetRef always advances by exactly what the server returned, never
-      // derived from seen/liked counts. getFeed() recomputes its ordered
-      // list fresh on every call -- an owner whose given/received ratio
-      // flips into deficit (e.g. from an earlier like in this very batch
-      // landing) drops out entirely, along with ALL their links, shifting
-      // everyone after them. A seen-minus-liked offset only ever accounts
-      // for 1-for-1 removal on success and drifts further off with every
-      // commit-time rejection (rate limit, or that same deficit flip), so a
-      // single short/duplicate-heavy page from a stale offset doesn't mean
-      // the pool is actually exhausted -- it means the list moved.
+      // Purge expired entries before every batch fetch so links that have
+      // passed their 12 h cooldown can be re-fetched.
+      purgeExpiredSeen();
+
       const offset = offsetRef.current;
       const res = await fetch(`/api/feed?offset=${offset}&limit=50`);
       const data = await res.json();
@@ -82,9 +91,6 @@ export function useAutoLike() {
       if (links.length > 0) {
         offsetRef.current += links.length;
       } else if (offsetRef.current > 0) {
-        // Reached end of feed at non-zero offset -- wrap back to offset 0
-        // so subsequent requests re-check the top of the feed instead of
-        // querying out-of-bounds offsets indefinitely.
         offsetRef.current = 0;
         const { active: currentActive, queue: currentQueue } = useAdStore.getState();
         const pendingIds = new Set([
@@ -92,12 +98,16 @@ export function useAutoLike() {
           ...currentActive.map((a) => a.linkId),
           ...currentQueue.map((q) => q.linkId),
         ]);
-        seenRef.current = pendingIds;
+        seenRef.current = new Map();
+        for (const id of pendingIds) {
+          seenRef.current.set(id, Date.now());
+        }
       }
 
       const newLinks = links.filter((l) => !seenRef.current.has(l.id));
+      const now = Date.now();
       for (const l of newLinks) {
-        seenRef.current.add(l.id);
+        seenRef.current.set(l.id, now);
       }
 
       if (newLinks.length > 0) {
@@ -117,7 +127,10 @@ export function useAutoLike() {
           ...currentQueue.map((q) => q.linkId),
         ]);
         if (seenRef.current.size > pendingIds.size) {
-          seenRef.current = pendingIds;
+          seenRef.current = new Map();
+          for (const id of pendingIds) {
+            seenRef.current.set(id, Date.now());
+          }
           noNewLinksStreakRef.current = 0;
         } else {
           exhaustedRef.current = true;
@@ -252,13 +265,12 @@ export function useAutoLike() {
         localQueueRef.current = prefetchRef.current;
       }
       prefetchRef.current = [];
-      // Deliberately NOT resetting seenRef here. seenRef already contains
-      // every id fetchBatch has ever returned this page session (including
-      // everything in localQueueRef, added when it was fetched) -- it's the
-      // one thing that must survive a stop()/start() cycle, so the
-      // offsetRef=0 re-scan above doesn't waste a full ad-view cycle
-      // re-attempting links already liked/failed/under the 12h per-pair
-      // cooldown, only to hit a guaranteed server-side rejection again.
+              // Deliberately NOT resetting seenRef here — it's now a Map<linkId,
+      // timestamp> with auto-expiry (entries older than 12 h are purged
+      // before each fetchBatch call), so links that have passed their
+      // cooldown can naturally re-surface without us having to wipe the
+      // entire map. Keeping it intact across stop/start prevents
+      // immediately re-fetching already-liked links.
       useAdStore.getState().setAdBlockerDetected(false);
       const tickRef = { current: 0 };
       const retryCountRef = { current: 0 };
@@ -352,7 +364,7 @@ export function useAutoLike() {
                       return;
                     }
                     exhaustedRef.current = false;
-                    seenRef.current = new Set();
+                    seenRef.current = new Map();
                     failedRef.current = 0;
                     offsetRef.current = 0;
                     noNewLinksStreakRef.current = 0;

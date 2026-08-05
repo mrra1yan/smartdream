@@ -24,37 +24,25 @@ const WebViewComponent = WebView as any;
 const CONFIG_URL = 'https://sd.docstec.cloud/api/app-version';
 const APP_VERSION = '1.0.0';
 const DEFAULT_WEB_URL = 'https://sd.docstec.cloud';
-// Matches src/app/api/app-version/route.ts's own default downloadUrl -- the
-// known-good fallback if remote config ever hands us an untrusted one.
 const DEFAULT_DOWNLOAD_URL = 'https://github.com/nurulhudda247/SmartDream-Releases/releases/latest/download/SmartDream.apk';
 
-// Hosts we trust for the main WebView's `source`. Remote config (`webUrl`)
-// only gets used if it resolves to one of these -- otherwise a compromised
-// or MITM'd config.json could redirect the whole app (with its
-// sharedCookiesEnabled session) to an attacker-controlled origin.
-// Mirrors the deploy targets this app actually serves from, per
-// next.config.ts's serverActions.allowedOrigins plus the hardcoded default
-// below.
-const ALLOWED_WEB_HOSTS = [
-  'sd.docstec.cloud',
-];
-
-// Host we trust for the forced-update download link. Releases are published
-// to GitHub Releases (see src/app/api/app-version/route.ts's default
-// downloadUrl) -- never hand Linking.openURL a value pointing anywhere else.
+const ALLOWED_WEB_HOSTS = ['sd.docstec.cloud'];
 const ALLOWED_DOWNLOAD_HOSTS = ['github.com'];
+
+// ── Ad timing (mirrors web layer src/lib/types.ts) ────────────────────
+const TOTAL_AD_MS = 14000;       // 4 s loading + 10 s viewing
+const TIMER_TICK_MS = 1000;
+const MAX_DISPLAY_ADS = 3;
 
 type AdInfo = {
   url: string;
   linkId: string;
+  /** When the native renderer received the ad (OPEN_AD / SYNC_ADS). */
+  startedAt: number;
+  /** When the ad WebView finished loading (onLoadEnd). */
+  loadedAt?: number;
 };
 
-/**
- * Parses `value` as an absolute http(s) URL, or returns null. Used both as a
- * standalone scheme check (ad URLs) and as the basis for the host-allowlist
- * check below -- centralizing it means every caller gets the same "must be
- * http/https, never javascript:/file:/intent:/etc." guarantee.
- */
 function parseHttpUrl(value: unknown): URL | null {
   if (typeof value !== 'string' || value.length === 0) return null;
   try {
@@ -75,15 +63,6 @@ function isAllowedHost(value: unknown, allowedHosts: string[]): boolean {
   return parsed !== null && allowedHosts.includes(parsed.hostname);
 }
 
-/**
- * Generates a per-session nonce the web layer must echo back on every
- * native->web bridge message (see dispatchToWeb). This RN version doesn't
- * ship a `crypto` global (no react-native-get-random-values / expo-crypto
- * installed, confirmed by inspecting node_modules), so prefer
- * crypto.randomUUID() when available and fall back to a
- * Math.random()+Date.now() combo otherwise. This only needs to be
- * unguessable by arbitrary page content, not cryptographically bulletproof.
- */
 function generateSessionNonce(): string {
   const cryptoObj = (globalThis as { crypto?: { randomUUID?: () => string } }).crypto;
   if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
@@ -92,14 +71,16 @@ function generateSessionNonce(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
 }
 
-// Maximum consecutive WebView error retries before showing the error modal.
-// Prevents infinite reload loops when the server is genuinely down.
 const MAX_ERROR_RETRIES = 3;
 
 function App(): React.JSX.Element {
   const mainWebViewRef = useRef<WebView>(null);
-  const [ads, setAds] = useState<AdInfo[]>([]);
-  const [adRefreshEpoch, setAdRefreshEpoch] = useState(0);
+  // ── Display ads (max 3) — no native queue ───────────────────────────
+  // The web layer (Zustand ad-store) owns the queue. Native is a pure
+  // renderer: it displays whatever OPEN_AD / SYNC_ADS tells it to.
+  const [displayAds, setDisplayAds] = useState<AdInfo[]>([]);
+  // Per-ad version counter → only recreate a WebView when its URL changes
+  const [adVersions, setAdVersions] = useState<Record<string, number>>({});
   const [updateInfo, setUpdateInfo] = useState<{ isRequired: boolean; url: string; notes: string } | null>(null);
   const [webUrl, setWebUrl] = useState<string>(DEFAULT_WEB_URL);
   const [configError, setConfigError] = useState<boolean>(false);
@@ -108,242 +89,73 @@ function App(): React.JSX.Element {
   const retryCountRef = useRef<number>(0);
   const [isInPiP, setIsInPiP] = useState<boolean>(false);
 
-  // ── Safety timeout for loading spinner ──────────────────────────────
-  // Guarantees the loading spinner disappears after 6 seconds even if
-  // slow dynamic third-party ad iframes/scripts keep loading in the background.
   useEffect(() => {
     if (webViewLoading) {
-      const timer = setTimeout(() => {
-        setWebViewLoading(false);
-      }, 6000);
+      const timer = setTimeout(() => setWebViewLoading(false), 6000);
       return () => clearTimeout(timer);
     }
   }, [webViewLoading]);
 
-  // One nonce per app session, shared with the web layer via BRIDGE_INIT and
-  // echoed on every subsequent native->web message so the web layer can
-  // reject forged AD_LOADED/AD_DISMISSED messages that didn't actually come
-  // from us (see dispatchToWeb + src/components/ad-container.tsx).
   const sessionNonceRef = useRef<string>('');
   if (!sessionNonceRef.current) {
     sessionNonceRef.current = generateSessionNonce();
   }
 
+  // ── Refs ──────────────────────────────────────────────────────────────
+  const displayAdsRef = useRef<AdInfo[]>([]);
+  const appStateRef = useRef<string>(AppState.currentState);
+  const autoLikeActiveRef = useRef<boolean>(false);
+  const adVersionsRef = useRef<Record<string, number>>({});
+  /** Ads whose native timer has expired and were visually removed. SYNC_ADS
+   *  must not re-add them (web still has them in active until its own timer
+   *  fires, which may be delayed in background/PiP). */
+  const visuallyDismissedRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => { displayAdsRef.current = displayAds; }, [displayAds]);
+  useEffect(() => { adVersionsRef.current = adVersions; }, [adVersions]);
+
+  const networkErrorRef = useRef<boolean>(networkError);
+  useEffect(() => { networkErrorRef.current = networkError; }, [networkError]);
+
+  const bumpAdVersion = useCallback((linkId: string) => {
+    setAdVersions((prev) => {
+      const next = { ...prev, [linkId]: (prev[linkId] ?? 0) + 1 };
+      adVersionsRef.current = next;
+      return next;
+    });
+  }, []);
+
+  // ── Config ────────────────────────────────────────────────────────────
   const fetchConfig = async () => {
     try {
-      // added cache buster to prevent cached config
       const res = await fetch(`${CONFIG_URL}?t=${Date.now()}`);
       if (!res.ok) throw new Error(`Config fetch failed: ${res.status}`);
       const data = await res.json();
-
-      // String compare versions. If API version doesn't match and forceUpdate is true, block app
       if (data.latestVersion !== APP_VERSION && data.forceUpdate) {
         const safeDownloadUrl = isAllowedHost(data.downloadUrl, ALLOWED_DOWNLOAD_HOSTS)
-          ? data.downloadUrl
-          : DEFAULT_DOWNLOAD_URL;
+          ? data.downloadUrl : DEFAULT_DOWNLOAD_URL;
         if (safeDownloadUrl !== data.downloadUrl) {
-          console.log('Rejected untrusted downloadUrl from remote config:', data.downloadUrl);
+          console.log('Rejected untrusted downloadUrl:', data.downloadUrl);
         }
-        setUpdateInfo({
-          isRequired: true,
-          url: safeDownloadUrl,
-          notes: data.releaseNotes,
-        });
+        setUpdateInfo({ isRequired: true, url: safeDownloadUrl, notes: data.releaseNotes });
       }
-
       if (data.webUrl && data.webUrl !== DEFAULT_WEB_URL) {
         if (isAllowedHost(data.webUrl, ALLOWED_WEB_HOSTS)) {
           setWebUrl(data.webUrl);
         } else {
-          console.log('Rejected untrusted webUrl from remote config:', data.webUrl);
+          console.log('Rejected untrusted webUrl:', data.webUrl);
         }
       }
     } catch (err) {
       console.log('Config check failed', err);
-      // If config fails and we have no cached or loaded state, we might let webview try.
     }
   };
 
-  const adsRef = useRef<AdInfo[]>([]);
-  const appStateRef = useRef<string>(AppState.currentState);
-  const autoLikeActiveRef = useRef<boolean>(false);
-  const adRefreshEpochRef = useRef(0);
+  function getProxiedAdUrl(adUrl: string): string {
+    return adUrl;
+  }
 
-  useEffect(() => { adsRef.current = ads; }, [ads]);
-
-  const updateAds = (nextAds: AdInfo[]) => {
-    adsRef.current = nextAds;
-    setAds(nextAds);
-  };
-
-  const refreshAdWebViews = () => {
-    adRefreshEpochRef.current += 1;
-    setAdRefreshEpoch(adRefreshEpochRef.current);
-  };
-
-	  // ── Load ad URLs directly (no proxy) ─────────────────────────────
-	  // Previously routed through /api/embed-frame proxy for header
-	  // enrichment, but Adsterra detects datacenter IPs (Vercel) and
-	  // returns blank pages. Loading directly uses the device's own IP.
-	  function getProxiedAdUrl(adUrl: string): string {
-	    return adUrl;
-	  }
-
-  const networkErrorRef = useRef<boolean>(networkError);
-  useEffect(() => {
-    networkErrorRef.current = networkError;
-  }, [networkError]);
-
-  useEffect(() => {
-    fetchConfig();
-
-    // ── Track app state for HEARTBEAT throttling ──────────────────────
-    // The HEARTBEAT interval only fires when the app is backgrounded so
-    // we don't waste CPU pinging the WebView while the user is active.
-    const appStateSub = AppState.addEventListener('change', (nextAppState) => {
-      const previousAppState = appStateRef.current;
-      appStateRef.current = nextAppState;
-      if (nextAppState === 'active' && previousAppState !== 'active') {
-        refreshAdWebViews();
-        dispatchToWeb({ type: 'HEARTBEAT' });
-      }
-    });
-
-    // ── Proactive network monitoring ──────────────────────────────────
-    // Auto-show the error when the device genuinely goes offline, and
-    // auto-recover (dismiss error + reload) when connectivity returns.
-    // Replaces the old "user must tap Retry" flow for network recovery.
-    let prevConnected: boolean | null = null;
-    const netInfoSub = NetInfo.addEventListener((state) => {
-      // NetInfo can emit multiple events with the same or null status.
-      // We only react when there is an actual change in the connection state.
-      if (state.isConnected === prevConnected) return;
-      prevConnected = state.isConnected;
-
-      if (state.isConnected === false) {
-        setNetworkError(true);
-      } else if (state.isConnected === true) {
-        // Network returned — auto-recover if the error modal is showing
-        if (networkErrorRef.current) {
-          setNetworkError(false);
-          retryCountRef.current = 0;
-          setWebViewLoading(true);
-          setTimeout(() => {
-            if (mainWebViewRef.current) {
-              mainWebViewRef.current.reload();
-            }
-          }, 500);
-        }
-      }
-    });
-
-    return () => {
-      appStateSub.remove();
-      netInfoSub();
-    };
-  }, []);
-
-  useEffect(() => {
-    if (Platform.OS === 'android') {
-      const subscription = DeviceEventEmitter.addListener('onPiPModeChanged', (event: any) => {
-        setIsInPiP(event.isInPiP === true);
-        refreshAdWebViews();
-        dispatchToWeb({ type: 'HEARTBEAT' });
-      });
-      return () => {
-        subscription.remove();
-      };
-    }
-  }, []);
-
-  useEffect(() => {
-    if (Platform.OS === 'android' && NativeModules.PipModule) {
-      try {
-        NativeModules.PipModule.setPiPEnabled(ads.length > 0);
-      } catch (e) {
-        console.log('Error setting PiP enabled:', e);
-      }
-    }
-  }, [ads]);
-
-  useEffect(() => {
-    // Keep WebView timers alive in the background.
-    // By pinging the WebView every second, we give Chromium a chance
-    // to process its JS task queue while the app is backgrounded.
-    const interval = setInterval(() => {
-      if (appStateRef.current === 'background' || appStateRef.current === 'inactive') {
-        dispatchToWeb({ type: 'HEARTBEAT' });
-      }
-    }, 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleQuit = () => {
-    if (Platform.OS === 'android') {
-      BackHandler.exitApp();
-    } else {
-      try {
-        // @ts-ignore
-        if (global && typeof global.close === 'function') {
-          // @ts-ignore
-          global.close();
-        } else {
-          // @ts-ignore
-          exit(0);
-        }
-      } catch (e) {
-        console.log('Exit failed', e);
-      }
-    }
-  };
-
-  const handleRetry = async () => {
-    setNetworkError(false);
-    setWebViewLoading(true);
-    retryCountRef.current = 0;
-    await fetchConfig();
-    if (mainWebViewRef.current) {
-      mainWebViewRef.current.reload();
-    }
-  };
-
-  // ── Connectivity-gated error handler ──────────────────────────────────
-  // Instead of blindly showing the error modal on any WebView error, check
-  // if the device actually has internet. If connected, auto-retry with
-  // exponential backoff. Only show the error after MAX_ERROR_RETRIES or
-  // when the device is genuinely offline.
-  const handleWebViewError = useCallback(async () => {
-    const state = await NetInfo.fetch();
-    if (state.isConnected === false) {
-      // Device is genuinely offline → show error immediately
-      setNetworkError(true);
-      return;
-    }
-    // Device is connected — this was a transient error (Vercel cold start,
-    // SSL hiccup, 502, etc.). Auto-retry with backoff.
-    retryCountRef.current++;
-    if (retryCountRef.current >= MAX_ERROR_RETRIES) {
-      // Too many consecutive failures even with connectivity — give up
-      setNetworkError(true);
-      return;
-    }
-    const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 8000);
-    setTimeout(() => {
-      if (mainWebViewRef.current) {
-        setWebViewLoading(true);
-        mainWebViewRef.current.reload();
-      }
-    }, delay);
-  }, []);
-
-  // Builds a `window.dispatchEvent(new MessageEvent(...))` call and runs it
-  // in the main WebView via injectJavaScript. `payload` is JSON.stringify'd
-  // here (real JS, not string-interpolated into the template) and then
-  // JSON.stringify'd again to embed it as a correctly-escaped JS string
-  // literal -- this is what actually neutralizes quotes/backslashes in any
-  // interpolated value, unlike the previous manual `'${linkId}'` wrapping.
-  // Every message also carries the session nonce so the web layer can tell
-  // this came from native and not from some arbitrary postMessage call.
+  // ── Bridge dispatch ───────────────────────────────────────────────────
   const dispatchToWeb = (payload: Record<string, unknown>) => {
     if (!mainWebViewRef.current) return;
     const serialized = JSON.stringify(
@@ -365,121 +177,260 @@ function App(): React.JSX.Element {
     `);
   };
 
+  // ── Remove an ad from display (manual X tap or CLOSE_AD from web) ────
+  const removeAd = useCallback((linkId: string) => {
+    const current = displayAdsRef.current;
+    const next = current.filter((a) => a.linkId !== linkId);
+    if (next.length !== current.length) {
+      setDisplayAds(next);
+      visuallyDismissedRef.current.delete(linkId);
+      setAdVersions((prev) => {
+        const nextVersions = { ...prev };
+        delete nextVersions[linkId];
+        return nextVersions;
+      });
+    }
+  }, []);
+
+  // ── Native-side visual timer (14 s cycle, no AD_DISMISSED) ───────────
+  // The commit is handled by the web layer's setTimeout / safety-net.
+  // Native only handles visual cycling so PiP users see fresh ads on time.
+  useEffect(() => {
+    const interval = setInterval(() => {
+      const now = Date.now();
+      const display = displayAdsRef.current;
+      let changed = false;
+      let next = display;
+      for (const ad of display) {
+        if (ad.startedAt > 0 && now - ad.startedAt >= TOTAL_AD_MS) {
+          next = next.filter((a) => a.linkId !== ad.linkId);
+          visuallyDismissedRef.current.add(ad.linkId);
+          changed = true;
+        }
+      }
+      if (changed) {
+        setDisplayAds(next);
+        const removed = display.filter((ad) => !next.some((a) => a.linkId === ad.linkId));
+        setAdVersions((prev) => {
+          const nv = { ...prev };
+          for (const ad of removed) delete nv[ad.linkId];
+          return nv;
+        });
+      }
+    }, TIMER_TICK_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  // ── PiP + network + app state ─────────────────────────────────────────
+  useEffect(() => {
+    fetchConfig();
+
+    const appStateSub = AppState.addEventListener('change', (nextAppState) => {
+      const prev = appStateRef.current;
+      appStateRef.current = nextAppState;
+      if (nextAppState === 'active' && prev !== 'active') {
+        dispatchToWeb({ type: 'HEARTBEAT' });
+      }
+    });
+
+    let prevConnected: boolean | null = null;
+    const netInfoSub = NetInfo.addEventListener((state) => {
+      if (state.isConnected === prevConnected) return;
+      prevConnected = state.isConnected;
+      if (state.isConnected === false) {
+        setNetworkError(true);
+      } else if (state.isConnected === true && networkErrorRef.current) {
+        setNetworkError(false);
+        retryCountRef.current = 0;
+        setWebViewLoading(true);
+        setTimeout(() => { mainWebViewRef.current?.reload(); }, 500);
+      }
+    });
+
+    return () => { appStateSub.remove(); netInfoSub(); };
+  }, []);
+
+  useEffect(() => {
+    if (Platform.OS === 'android') {
+      const sub = DeviceEventEmitter.addListener('onPiPModeChanged', (event: any) => {
+        setIsInPiP(event.isInPiP === true);
+        dispatchToWeb({ type: 'HEARTBEAT' });
+      });
+      return () => sub.remove();
+    }
+  }, [dispatchToWeb]);
+
+  // PiP gate: enable when ads are showing OR auto-like is active
+  useEffect(() => {
+    if (Platform.OS === 'android' && NativeModules.PipModule) {
+      const enable = displayAds.length > 0 || autoLikeActiveRef.current === true;
+      try { NativeModules.PipModule.setPiPEnabled(enable); } catch (e) {}
+    }
+  }, [displayAds]);
+
+  // Background heartbeat: keep web WebView timers alive
+  useEffect(() => {
+    const interval = setInterval(() => {
+      if (appStateRef.current === 'background' || appStateRef.current === 'inactive') {
+        dispatchToWeb({ type: 'HEARTBEAT' });
+      }
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [dispatchToWeb]);
+
+  // ── WebView error / retry ─────────────────────────────────────────────
+  const handleQuit = () => {
+    if (Platform.OS === 'android') BackHandler.exitApp();
+  };
+
+  const handleRetry = async () => {
+    setNetworkError(false);
+    setWebViewLoading(true);
+    retryCountRef.current = 0;
+    await fetchConfig();
+    mainWebViewRef.current?.reload();
+  };
+
+  const handleWebViewError = useCallback(async () => {
+    const state = await NetInfo.fetch();
+    if (state.isConnected === false) { setNetworkError(true); return; }
+    retryCountRef.current++;
+    if (retryCountRef.current >= MAX_ERROR_RETRIES) { setNetworkError(true); return; }
+    const delay = Math.min(1000 * Math.pow(2, retryCountRef.current - 1), 8000);
+    setTimeout(() => {
+      if (mainWebViewRef.current) { setWebViewLoading(true); mainWebViewRef.current.reload(); }
+    }, delay);
+  }, []);
+
+  // ── Main message handler ──────────────────────────────────────────────
   const onMainMessage = (event: WebViewMessageEvent) => {
     try {
       const data = JSON.parse(event.nativeEvent.data);
+
       if (data.type === 'OPEN_AD') {
-        if (typeof data.linkId !== 'string' || data.linkId.length === 0 || !isHttpUrl(data.url)) {
-          console.log('Rejected OPEN_AD with invalid linkId or URL:', data.linkId, data.url);
-          return;
-        }
-        // Resend BRIDGE_INIT (same nonce -- idempotent, the web side just
-        // overwrites nativeBridgeNonce with the same value) alongside every
-        // OPEN_AD, not just once at main-webview load. Closes the race
-        // where AdContainer's message listener hasn't registered yet at the
-        // moment the original load-time BRIDGE_INIT fired, which would
-        // otherwise leave nativeBridgeNonce null for the rest of the
-        // session and cause every AD_LOADED/AD_DISMISSED to be silently
-        // dropped by the strict nonce check. Every AD_DISMISSED necessarily
-        // comes after an OPEN_AD for the same ad, so this ordering
-        // guarantees the nonce is set before any dismissal can arrive.
-        dispatchToWeb({ type: 'BRIDGE_INIT' });
-        const current = adsRef.current;
-        const existing = current.find((ad) => ad.linkId === data.linkId);
-        if (existing?.url === data.url) return;
+        if (typeof data.linkId !== 'string' || !data.linkId || !isHttpUrl(data.url)) return;
 
+        dispatchToWeb({ type: 'BRIDGE_INIT' }); // ensure nonce
+
+        const current = displayAdsRef.current;
+
+        // Already showing this ad?
+        const existing = current.find((a) => a.linkId === data.linkId);
         if (existing) {
-          updateAds(current.map((ad) =>
-            ad.linkId === data.linkId ? { url: data.url, linkId: data.linkId } : ad,
+          if (existing.url === data.url) return; // duplicate
+          // URL changed — update in place
+          setDisplayAds(current.map((a) =>
+            a.linkId === data.linkId ? { ...a, url: data.url, startedAt: Date.now(), loadedAt: undefined } : a
           ));
-          refreshAdWebViews();
+          bumpAdVersion(data.linkId);
+          visuallyDismissedRef.current.delete(data.linkId);
           return;
         }
 
-        const nextAds = [...current, { url: data.url, linkId: data.linkId }];
-        const evicted = nextAds.length > 3 ? nextAds.slice(0, nextAds.length - 3) : [];
-        updateAds(nextAds.slice(-3));
-        refreshAdWebViews();
-        evicted.forEach((ad) => dispatchToWeb({ type: 'AD_DISMISSED', linkId: ad.linkId }));
+        // If display is full, ignore — web layer's queue handles overflow.
+        // The web will send another OPEN_AD when a slot frees up (via
+        // startNext after an ad completes).
+        if (current.length >= MAX_DISPLAY_ADS) {
+          console.log('[OPEN_AD] Display full, deferring to web queue:', data.linkId);
+          return;
+        }
+
+        const newAd: AdInfo = { url: data.url, linkId: data.linkId, startedAt: Date.now(), loadedAt: undefined };
+        setDisplayAds([...current, newAd]);
+        bumpAdVersion(data.linkId);
+        visuallyDismissedRef.current.delete(data.linkId);
+
       } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
         autoLikeActiveRef.current = data.active === true;
+        if (Platform.OS === 'android' && NativeModules.PipModule) {
+          try {
+            NativeModules.PipModule.setAutoLikeActive(autoLikeActiveRef.current);
+            const enable = displayAdsRef.current.length > 0 || autoLikeActiveRef.current === true;
+            NativeModules.PipModule.setPiPEnabled(enable);
+          } catch (e) {}
+        }
+
       } else if (data.type === 'CLOSE_AD') {
-        const currentAd = adsRef.current.find((a) => a.linkId === data.linkId);
-        if (currentAd && typeof data.url === 'string' && currentAd.url !== data.url) return;
-        const nextAds = adsRef.current.filter((a) => a.linkId !== data.linkId);
-        if (nextAds.length !== adsRef.current.length) {
-          updateAds(nextAds);
-          refreshAdWebViews();
-        }
+        // Web confirms ad removal — clean up display
+        removeAd(data.linkId);
+
       } else if (data.type === 'SYNC_ADS') {
-        // ── Full ad-state sync from the web layer's HEARTBEAT handler.
-        //     When Chromium throttles React re-renders in the background,
-        //     the normal OPEN_AD/CLOSE_AD messages are delayed. This
-        //     heartbeat-driven sync keeps the ad container
-        //     visually in sync with the actual ad-store state.
+        // Full ad-state sync from web HEARTBEAT.
         const incoming = (data.ads || []) as AdInfo[];
-        // Validate each ad object has required string fields before
-        // trusting the array — prevents undefined propagation into
-        // closeAdManually / getProxiedAdUrl if a malformed ad slips through.
         const valid = incoming.filter(
-          (a: any) => typeof a?.linkId === 'string' && a.linkId.length > 0 && isHttpUrl(a?.url),
+          (a: any) => typeof a?.linkId === 'string' && a.linkId.length > 0 && isHttpUrl(a?.url)
         );
-        const unique = valid.filter(
-          (ad, index, list) => list.findIndex((item) => item.linkId === ad.linkId) === index,
+        // Filter out ads the native timer has already visually dismissed
+        const filtered = valid.filter(
+          (a: AdInfo) => !visuallyDismissedRef.current.has(a.linkId)
         );
-        const bounded = unique.slice(-3);
-        const current = adsRef.current;
-        const changed =
-          current.length !== bounded.length ||
-          current.some((ad, index) =>
-            ad.linkId !== bounded[index]?.linkId || ad.url !== bounded[index]?.url,
-          );
+        const unique = filtered.filter(
+          (ad, i, list) => list.findIndex((x) => x.linkId === ad.linkId) === i
+        );
+
+        // Take first 3 only (web layer sends max 3 active ads)
+        const incomingIds = new Set(unique.map((a: AdInfo) => a.linkId));
+        const now = Date.now();
+        const current = displayAdsRef.current;
+
+        // Preserve startedAt/loadedAt for ads already showing
+        const next: AdInfo[] = unique.slice(0, MAX_DISPLAY_ADS).map((incomingAd) => {
+          const existing = current.find((a) => a.linkId === incomingAd.linkId);
+          if (existing) return { ...incomingAd, startedAt: existing.startedAt, loadedAt: existing.loadedAt };
+          return { ...incomingAd, startedAt: now, loadedAt: undefined };
+        });
+
+        const changed = next.length !== current.length ||
+          next.some((ad, i) => ad.linkId !== current[i]?.linkId || ad.url !== current[i]?.url);
+
         if (changed) {
-          const removed = current.filter(
-            (ad) => !bounded.some((incomingAd) => incomingAd.linkId === ad.linkId),
-          );
-          updateAds(bounded);
-          refreshAdWebViews();
-          removed.forEach((ad) => dispatchToWeb({ type: 'AD_DISMISSED', linkId: ad.linkId }));
+          setDisplayAds(next);
+          for (const ad of next) {
+            const existing = current.find((a) => a.linkId === ad.linkId);
+            if (!existing || existing.url !== ad.url) bumpAdVersion(ad.linkId);
+          }
         }
+
+        // Notify web about ads that were in display but not in incoming
+        const removed = current.filter((ad) => !incomingIds.has(ad.linkId));
+        for (const ad of removed) {
+          dispatchToWeb({ type: 'AD_DISMISSED', linkId: ad.linkId });
+          visuallyDismissedRef.current.delete(ad.linkId);
+        }
+
       } else if (data.type === 'CLEAR_CACHE') {
-        updateAds([]);
-        refreshAdWebViews();
-        if (mainWebViewRef.current) {
-          mainWebViewRef.current.clearCache(true);
-          mainWebViewRef.current.clearHistory?.();
-          mainWebViewRef.current.reload();
-        }
+        setDisplayAds([]);
+        setAdVersions({});
+        visuallyDismissedRef.current = new Set();
+        mainWebViewRef.current?.clearCache(true);
+        mainWebViewRef.current?.clearHistory?.();
+        mainWebViewRef.current?.reload();
       }
-    } catch (e) {
-      // Ignore invalid JSON
-    }
+    } catch (e) { /* invalid JSON */ }
   };
 
-  const closeAdManually = (linkId: string) => {
-    dispatchToWeb({ type: 'AD_DISMISSED', linkId });
-    const nextAds = adsRef.current.filter((a) => a.linkId !== linkId);
-    updateAds(nextAds);
-    refreshAdWebViews();
-  };
-
+  // ── Render single ad WebView ──────────────────────────────────────────
   const renderAdWebView = (ad: AdInfo | null) => {
     if (!ad) return null;
+    const version = adVersions[ad.linkId] ?? 0;
+    const elapsedSec = ad.startedAt > 0 ? Math.floor((Date.now() - ad.startedAt) / 1000) : 0;
+    const isLoading = ad.startedAt > 0 && !ad.loadedAt && elapsedSec < 4;
 
     return (
       <WebViewComponent
-        key={`${ad.linkId}:${ad.url}:${adRefreshEpoch}`}
+        key={`${ad.linkId}:${version}`}
         source={{ uri: getProxiedAdUrl(ad.url) }}
         style={styles.floatingWebView}
-        onLoadEnd={() => { if (ad) dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId }) }}
-        onError={(syntheticEvent: any) => {
-          const { nativeEvent } = syntheticEvent;
-          console.log('Ad WebView error:', nativeEvent);
+        onLoadEnd={() => {
+          if (ad) {
+            setDisplayAds((prev) =>
+              prev.map((a) => (a.linkId === ad.linkId ? { ...a, loadedAt: Date.now() } : a))
+            );
+            dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId });
+          }
         }}
-        onHttpError={(syntheticEvent: any) => {
-          const { nativeEvent } = syntheticEvent;
-          console.log('Ad WebView HTTP error:', nativeEvent.statusCode);
-        }}
+        onError={(e: any) => console.log('Ad WebView error:', e.nativeEvent)}
+        onHttpError={(e: any) => console.log('Ad WebView HTTP error:', e.nativeEvent.statusCode)}
         allowsInlineMediaPlayback
         mediaPlaybackRequiresUserAction={false}
         javaScriptEnabled
@@ -498,34 +449,31 @@ function App(): React.JSX.Element {
             window.alert = function(){};
             window.confirm = function(){ return false; };
             window.prompt = function(){ return null; };
-            var muteAll = function() {
-              var v = document.getElementsByTagName('video');
-              for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
-              var a = document.getElementsByTagName('audio');
-              for(var i=0; i<a.length; i++) { a[i].muted = true; a[i].volume = 0; }
+            var muteAll=function(){
+              var v=document.getElementsByTagName('video');
+              for(var i=0;i<v.length;i++){v[i].muted=true;v[i].volume=0;}
+              var a=document.getElementsByTagName('audio');
+              for(var i=0;i<a.length;i++){a[i].muted=true;a[i].volume=0;}
             };
-            muteAll();
-            setInterval(muteAll, 1000);
-            document.addEventListener('click', function(e) {
-              var target = e.target;
-              while (target && target.tagName !== 'A') target = target.parentNode;
-              if (target) {
-                var href = (target.href || '').toLowerCase();
-                if (target.hasAttribute('download') || href.includes('.apk') || href.startsWith('blob:')) {
-                  e.preventDefault();
-                  e.stopPropagation();
-                  e.stopImmediatePropagation();
+            muteAll();setInterval(muteAll,1000);
+            document.addEventListener('click',function(e){
+              var t=e.target;
+              while(t&&t.tagName!=='A')t=t.parentNode;
+              if(t){
+                var h=(t.href||'').toLowerCase();
+                if(t.hasAttribute('download')||h.includes('.apk')||h.startsWith('blob:')){
+                  e.preventDefault();e.stopPropagation();e.stopImmediatePropagation();
                 }
               }
-            }, true);
+            },true);
           })();
           true;
         `}
         onShouldStartLoadWithRequest={(req: any) => {
-          const url = req.url;
-          if (!url || url === 'about:blank') return true;
-          if (!url.startsWith('http://') && !url.startsWith('https://')) return false;
-          var lower = url.toLowerCase();
+          const u = req.url;
+          if (!u || u === 'about:blank') return true;
+          if (!u.startsWith('http://') && !u.startsWith('https://')) return false;
+          const lower = u.toLowerCase();
           if (lower.includes('play.google.com') || lower.includes('market://') || lower.includes('intent://') || lower.includes('.apk') || lower.includes('download=') || lower.includes('force-download') || lower.includes('redirect=') || lower.includes('redirect_url=')) return false;
           return true;
         }}
@@ -538,19 +486,14 @@ function App(): React.JSX.Element {
     );
   };
 
+  // ── Render ────────────────────────────────────────────────────────────
+  const hasAds = displayAds.length > 0;
+
   return (
     <SafeAreaView style={styles.container}>
       <StatusBar barStyle="light-content" backgroundColor="#000" hidden={isInPiP} />
-      <View style={[
-        styles.innerContainer, 
-        { paddingTop: Platform.OS === 'android' && !isInPiP ? (StatusBar.currentHeight ?? 24) : 0 }
-      ]}>
-
-        {/* Main WebView Container */}
-        <View style={[
-          styles.mainWebViewContainer,
-          isInPiP && styles.hiddenMainWebView
-        ]}>
+      <View style={[styles.innerContainer, { paddingTop: Platform.OS === 'android' && !isInPiP ? (StatusBar.currentHeight ?? 24) : 0 }]}>
+        <View style={[styles.mainWebViewContainer, isInPiP && styles.hiddenMainWebView]}>
           <WebViewComponent
             ref={mainWebViewRef}
             source={{ uri: webUrl }}
@@ -564,9 +507,8 @@ function App(): React.JSX.Element {
               retryCountRef.current = 0;
               dispatchToWeb({ type: 'BRIDGE_INIT' });
             }}
-            onLoadProgress={(syntheticEvent: any) => {
-              const progress = syntheticEvent?.nativeEvent?.progress;
-              if (typeof progress === 'number' && progress > 0.75) {
+            onLoadProgress={(e: any) => {
+              if (typeof e?.nativeEvent?.progress === 'number' && e.nativeEvent.progress > 0.75) {
                 setWebViewLoading(false);
               }
             }}
@@ -578,39 +520,31 @@ function App(): React.JSX.Element {
             sharedCookiesEnabled={true}
             thirdPartyCookiesEnabled={true}
             injectedJavaScript={`
-              (function() {
-                try {
-                  var AudioContext = window.AudioContext || window.webkitAudioContext;
-                  if (AudioContext) {
-                    var ctx = new AudioContext();
-                    var oscillator = ctx.createOscillator();
-                    var gainNode = ctx.createGain();
-                    gainNode.gain.value = 0.0001; // virtually silent
-                    oscillator.connect(gainNode);
-                    gainNode.connect(ctx.destination);
-                    oscillator.start();
-                  }
-                } catch(e) {}
+              (function(){
+                try{
+                  var ctx=new (window.AudioContext||window.webkitAudioContext)();
+                  var o=ctx.createOscillator();
+                  var g=ctx.createGain();g.gain.value=0.0001;
+                  o.connect(g);g.connect(ctx.destination);o.start();
+                }catch(e){}
               })();
               true;
             `}
             androidLayerType="hardware"
             onShouldStartLoadWithRequest={(req: any) => {
-              const url = req.url;
-              if (!url) return true;
-              return isAllowedHost(url, ALLOWED_WEB_HOSTS) || url.startsWith('about:');
+              const u = req.url;
+              if (!u) return true;
+              return isAllowedHost(u, ALLOWED_WEB_HOSTS) || u.startsWith('about:');
             }}
             onError={() => handleWebViewError()}
-            onHttpError={(syntheticEvent: any) => {
-              const statusCode = syntheticEvent?.nativeEvent?.statusCode;
-              if (typeof statusCode === 'number' && statusCode >= 500) {
+            onHttpError={(e: any) => {
+              if (typeof e?.nativeEvent?.statusCode === 'number' && e.nativeEvent.statusCode >= 500) {
                 handleWebViewError();
               }
             }}
           />
         </View>
 
-        {/* Custom Loading Overlay */}
         {webViewLoading && !isInPiP && (
           <View style={styles.loadingContainer}>
             <ActivityIndicator size="large" color="#a855f7" />
@@ -618,12 +552,7 @@ function App(): React.JSX.Element {
           </View>
         )}
 
-        {/* Floating Container for Multiple Ads / Full screen in PiP */}
-        <View style={[
-          styles.adsWrapper, 
-          ads.length === 0 && { display: 'none' },
-          isInPiP && styles.pipAdsWrapper
-        ]}>
+        <View style={[styles.adsWrapper, !hasAds && { display: 'none' }, isInPiP && styles.pipAdsWrapper]}>
           <ScrollView
             horizontal={!isInPiP}
             scrollEnabled={!isInPiP}
@@ -633,27 +562,37 @@ function App(): React.JSX.Element {
             overScrollMode="never"
           >
             {[0, 1, 2].map((index) => {
-              const ad = ads[index] || null;
+              const ad = displayAds[index] || null;
+              const elapsedSec = ad && ad.startedAt > 0 ? Math.floor((Date.now() - ad.startedAt) / 1000) : 0;
+              const isLoadingPhase = ad && ad.startedAt > 0 && !ad.loadedAt && elapsedSec < 4;
 
               return (
-              <View
-                key={ad ? `${ad.linkId}:${ad.url}:${adRefreshEpoch}` : `empty-ad-slot-${index}`}
-                style={[
-                  styles.floatingAdContainer, 
-                  !ad && { display: 'none' },
-                  isInPiP && styles.pipAdSlot
-                ]}
-              >
-                {!isInPiP && (
-                  <View style={styles.adHeader}>
-                    <Text style={styles.adTitle}>Ad is active</Text>
-                    <TouchableOpacity onPress={() => ad && closeAdManually(ad.linkId)} style={styles.closeBtn}>
-                      <Text style={styles.closeBtnText}>X</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-                {renderAdWebView(ad)}
-              </View>
+                <View
+                  key={ad ? `${ad.linkId}:${adVersions[ad.linkId] ?? 0}` : `empty-slot-${index}`}
+                  style={[styles.floatingAdContainer, !ad && { display: 'none' }, isInPiP && styles.pipAdSlot]}
+                >
+                  {!isInPiP && (
+                    <View style={styles.adHeader}>
+                      <Text style={styles.adTitle}>
+                        {ad ? (isLoadingPhase ? 'Loading ad...' : 'Ad is active') : 'Ad is active'}
+                      </Text>
+                      <TouchableOpacity onPress={() => {
+                        if (ad) {
+                          dispatchToWeb({ type: 'AD_DISMISSED', linkId: ad.linkId });
+                          removeAd(ad.linkId);
+                        }
+                      }} style={styles.closeBtn}>
+                        <Text style={styles.closeBtnText}>X</Text>
+                      </TouchableOpacity>
+                    </View>
+                  )}
+                  {isInPiP && ad && (
+                    <View style={styles.pipLabel}>
+                      <Text style={styles.pipLabelText}>{isLoadingPhase ? 'Loading...' : 'Viewing...'}</Text>
+                    </View>
+                  )}
+                  {renderAdWebView(ad)}
+                </View>
               );
             })}
           </ScrollView>
@@ -661,19 +600,12 @@ function App(): React.JSX.Element {
       </View>
 
       {updateInfo?.isRequired && (
-        <Modal visible={true} transparent={true} animationType="fade">
+        <Modal visible={true} transparent animationType="fade">
           <View style={styles.updateOverlay}>
             <View style={styles.updateModal}>
               <Text style={styles.updateTitle}>Update Required</Text>
               <Text style={styles.updateNotes}>{updateInfo.notes}</Text>
-              <TouchableOpacity
-                style={styles.updateButton}
-                onPress={() => {
-                  if (updateInfo.url) {
-                    Linking.openURL(updateInfo.url);
-                  }
-                }}
-              >
+              <TouchableOpacity style={styles.updateButton} onPress={() => { if (updateInfo.url) Linking.openURL(updateInfo.url); }}>
                 <Text style={styles.updateButtonText}>Update Now</Text>
               </TouchableOpacity>
             </View>
@@ -681,29 +613,17 @@ function App(): React.JSX.Element {
         </Modal>
       )}
 
-      <Modal visible={networkError} transparent={true} animationType="fade">
+      <Modal visible={networkError} transparent animationType="fade">
         <View style={styles.errorOverlay}>
           <View style={styles.errorModal}>
-            <View style={styles.errorIconContainer}>
-              <Text style={styles.errorIcon}>📶</Text>
-            </View>
+            <View style={styles.errorIconContainer}><Text style={styles.errorIcon}>📶</Text></View>
             <Text style={styles.errorTitle}>Internet Connection Lost</Text>
-            <Text style={styles.errorSubtitle}>
-              আপনার ইন্টারনেট সংযোগ বিচ্ছিন্ন হয়ে গেছে। অনুগ্রহ করে কানেকশন চেক করে আবার চেষ্টা করুন।
-            </Text>
-
+            <Text style={styles.errorSubtitle}>আপনার ইন্টারনেট সংযোগ বিচ্ছিন্ন হয়ে গেছে। অনুগ্রহ করে কানেকশন চেক করে আবার চেষ্টা করুন।</Text>
             <View style={styles.errorButtonGroup}>
-              <TouchableOpacity
-                style={[styles.errorButton, styles.retryButton]}
-                onPress={handleRetry}
-              >
+              <TouchableOpacity style={[styles.errorButton, styles.retryButton]} onPress={handleRetry}>
                 <Text style={styles.retryButtonText}>Retry (আবার চেষ্টা করুন)</Text>
               </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[styles.errorButton, styles.quitButton]}
-                onPress={handleQuit}
-              >
+              <TouchableOpacity style={[styles.errorButton, styles.quitButton]} onPress={handleQuit}>
                 <Text style={styles.quitButtonText}>Quit (বন্ধ করুন)</Text>
               </TouchableOpacity>
             </View>
@@ -715,257 +635,72 @@ function App(): React.JSX.Element {
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  pipContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
+  container: { flex: 1, backgroundColor: '#000' },
   pipAdsWrapper: {
-    position: 'relative',
-    flex: 1,
-    height: '100%',
-    width: '100%',
-    backgroundColor: '#000',
-    padding: 2,
-    paddingVertical: 2,
-    paddingBottom: 2,
-    bottom: undefined,
-    left: undefined,
-    right: undefined,
-    zIndex: 20,
+    position: 'relative', flex: 1, height: '100%', width: '100%',
+    backgroundColor: '#000', padding: 2, paddingVertical: 2, paddingBottom: 2,
+    bottom: undefined, left: undefined, right: undefined, zIndex: 20,
   },
-  pipAdsRow: {
-    flexDirection: 'row',
-    width: '100%',
-    height: '100%',
-    gap: 2,
-  },
+  pipAdsRow: { flexDirection: 'row', width: '100%', height: '100%', gap: 2 },
   pipAdSlot: {
-    flex: 1,
-    height: '100%',
-    backgroundColor: '#1e1e1e',
-    borderRadius: 4,
-    overflow: 'hidden',
-    borderColor: '#333',
-    borderWidth: 0.5,
+    flex: 1, height: '100%', backgroundColor: '#1e1e1e',
+    borderRadius: 4, overflow: 'hidden', borderColor: '#333', borderWidth: 0.5,
   },
-  mainWebViewContainer: {
-    flex: 1,
+  pipLabel: {
+    position: 'absolute', top: 4, left: 4, zIndex: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 4,
   },
-  hiddenMainWebView: {
-    position: 'absolute',
-    width: 0,
-    height: 0,
-    opacity: 0,
-  },
-  innerContainer: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  mainWebView: {
-    flex: 1,
-    backgroundColor: 'transparent',
-  },
+  pipLabelText: { color: '#fff', fontSize: 8, fontWeight: 'bold' },
+  mainWebViewContainer: { flex: 1 },
+  hiddenMainWebView: { position: 'absolute', width: 0, height: 0, opacity: 0 },
+  innerContainer: { flex: 1, backgroundColor: '#000' },
+  mainWebView: { flex: 1, backgroundColor: 'transparent' },
   loadingContainer: {
-    position: 'absolute',
-    top: 0,
-    bottom: 0,
-    left: 0,
-    right: 0,
-    justifyContent: 'center',
-    alignItems: 'center',
-    backgroundColor: '#09090b',
+    position: 'absolute', top: 0, bottom: 0, left: 0, right: 0,
+    justifyContent: 'center', alignItems: 'center', backgroundColor: '#09090b',
   },
-  loadingText: {
-    color: '#a855f7',
-    marginTop: 12,
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
+  loadingText: { color: '#a855f7', marginTop: 12, fontSize: 16, fontWeight: 'bold' },
   adsWrapper: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: 180, // Height for the bottom ads container
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingVertical: 10,
-    // Add extra padding at bottom for Android gesture bar
-    paddingBottom: Platform.OS === 'android' ? 24 : 10,
-    zIndex: 20,
+    position: 'absolute', bottom: 0, left: 0, right: 0, height: 180,
+    backgroundColor: 'rgba(0,0,0,0.6)', paddingVertical: 10,
+    paddingBottom: Platform.OS === 'android' ? 24 : 10, zIndex: 20,
   },
-  scrollContent: {
-    paddingHorizontal: 10,
-  },
+  scrollContent: { paddingHorizontal: 10 },
   floatingAdContainer: {
-    width: 110, // Reduced to half (was 220)
-    height: 160,
-    backgroundColor: '#1e1e1e',
-    borderRadius: 8,
-    overflow: 'hidden',
-    borderColor: '#444',
-    borderWidth: 1,
-    marginRight: 10, // For spacing between items
+    width: 110, height: 160, backgroundColor: '#1e1e1e',
+    borderRadius: 8, overflow: 'hidden', borderColor: '#444', borderWidth: 1, marginRight: 10,
   },
   adHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    backgroundColor: '#2c2c2c',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderBottomWidth: 1,
-    borderBottomColor: '#444',
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    backgroundColor: '#2c2c2c', paddingHorizontal: 10, paddingVertical: 6,
+    borderBottomWidth: 1, borderBottomColor: '#444',
   },
-  adTitle: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  closeBtn: {
-    backgroundColor: '#555',
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  closeBtnText: {
-    color: '#fff',
-    fontSize: 10,
-    fontWeight: 'bold',
-  },
-  floatingWebView: {
-    flex: 1,
-    backgroundColor: '#000',
-  },
-  updateOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 20,
-  },
-  updateModal: {
-    width: '100%',
-    backgroundColor: '#1e1e1e',
-    borderRadius: 16,
-    padding: 24,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: '#444',
-  },
-  updateTitle: {
-    fontSize: 22,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 12,
-  },
-  updateNotes: {
-    fontSize: 14,
-    color: '#aaa',
-    textAlign: 'center',
-    marginBottom: 24,
-    lineHeight: 20,
-  },
-  updateButton: {
-    backgroundColor: '#a855f7',
-    paddingVertical: 14,
-    paddingHorizontal: 32,
-    borderRadius: 30,
-    width: '100%',
-    alignItems: 'center',
-  },
-  updateButtonText: {
-    color: '#fff',
-    fontSize: 16,
-    fontWeight: 'bold',
-  },
-  errorOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(9, 9, 11, 0.95)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    padding: 24,
-  },
+  adTitle: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+  closeBtn: { backgroundColor: '#555', width: 20, height: 20, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
+  closeBtnText: { color: '#fff', fontSize: 10, fontWeight: 'bold' },
+  floatingWebView: { flex: 1, backgroundColor: '#000' },
+  updateOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.85)', justifyContent: 'center', alignItems: 'center', padding: 20 },
+  updateModal: { width: '100%', backgroundColor: '#1e1e1e', borderRadius: 16, padding: 24, alignItems: 'center', borderWidth: 1, borderColor: '#444' },
+  updateTitle: { fontSize: 22, fontWeight: 'bold', color: '#fff', marginBottom: 12 },
+  updateNotes: { fontSize: 14, color: '#aaa', textAlign: 'center', marginBottom: 24, lineHeight: 20 },
+  updateButton: { backgroundColor: '#a855f7', paddingVertical: 14, paddingHorizontal: 32, borderRadius: 30, width: '100%', alignItems: 'center' },
+  updateButtonText: { color: '#fff', fontSize: 16, fontWeight: 'bold' },
+  errorOverlay: { flex: 1, backgroundColor: 'rgba(9,9,11,0.95)', justifyContent: 'center', alignItems: 'center', padding: 24 },
   errorModal: {
-    width: '100%',
-    maxWidth: 340,
-    backgroundColor: '#18181b',
-    borderRadius: 24,
-    padding: 30,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(168, 85, 247, 0.2)',
-    shadowColor: '#a855f7',
-    shadowOffset: { width: 0, height: 8 },
-    shadowOpacity: 0.15,
-    shadowRadius: 24,
-    elevation: 8,
+    width: '100%', maxWidth: 340, backgroundColor: '#18181b', borderRadius: 24, padding: 30,
+    alignItems: 'center', borderWidth: 1, borderColor: 'rgba(168,85,247,0.2)',
+    shadowColor: '#a855f7', shadowOffset: { width: 0, height: 8 }, shadowOpacity: 0.15, shadowRadius: 24, elevation: 8,
   },
-  errorIconContainer: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: 'rgba(168, 85, 247, 0.1)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 20,
-    borderWidth: 1,
-    borderColor: 'rgba(168, 85, 247, 0.3)',
-  },
-  errorIcon: {
-    fontSize: 28,
-    color: '#a855f7',
-  },
-  errorTitle: {
-    fontSize: 20,
-    fontWeight: 'bold',
-    color: '#fff',
-    marginBottom: 10,
-    textAlign: 'center',
-  },
-  errorSubtitle: {
-    fontSize: 14,
-    color: '#a1a1aa',
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 24,
-  },
-  errorButtonGroup: {
-    width: '100%',
-    gap: 12,
-  },
-  errorButton: {
-    paddingVertical: 14,
-    borderRadius: 12,
-    alignItems: 'center',
-    justifyContent: 'center',
-    width: '100%',
-  },
-  retryButton: {
-    backgroundColor: '#a855f7',
-  },
-  retryButtonText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: 'bold',
-  },
-  quitButton: {
-    backgroundColor: 'transparent',
-    borderWidth: 1,
-    borderColor: 'rgba(255, 255, 255, 0.15)',
-  },
-  quitButtonText: {
-    color: '#d4d4d8',
-    fontSize: 15,
-    fontWeight: '600',
-  },
+  errorIconContainer: { width: 64, height: 64, borderRadius: 32, backgroundColor: 'rgba(168,85,247,0.1)', justifyContent: 'center', alignItems: 'center', marginBottom: 20, borderWidth: 1, borderColor: 'rgba(168,85,247,0.3)' },
+  errorIcon: { fontSize: 28, color: '#a855f7' },
+  errorTitle: { fontSize: 20, fontWeight: 'bold', color: '#fff', marginBottom: 10, textAlign: 'center' },
+  errorSubtitle: { fontSize: 14, color: '#a1a1aa', textAlign: 'center', lineHeight: 20, marginBottom: 24 },
+  errorButtonGroup: { width: '100%', gap: 12 },
+  errorButton: { paddingVertical: 14, borderRadius: 12, alignItems: 'center', justifyContent: 'center', width: '100%' },
+  retryButton: { backgroundColor: '#a855f7' },
+  retryButtonText: { color: '#fff', fontSize: 15, fontWeight: 'bold' },
+  quitButton: { backgroundColor: 'transparent', borderWidth: 1, borderColor: 'rgba(255,255,255,0.15)' },
+  quitButtonText: { color: '#d4d4d8', fontSize: 15, fontWeight: '600' },
 });
 
 export default App;

@@ -28,7 +28,13 @@ class MainActivity : ReactActivity() {
 
   override fun onUserLeaveHint() {
     super.onUserLeaveHint()
-    if (PipModule.isPiPEnabled && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+    // Enter PiP when either:
+    // 1. Ads are currently displayed (the normal case), OR
+    // 2. Auto-like is active (even if all 3 display slots are momentarily
+    //    empty between batches — without this the PiP window would close
+    //    during the gap and the user would have to re-open the app).
+    val shouldEnterPiP = PipModule.isPiPEnabled || PipModule.isAutoLikeActive
+    if (shouldEnterPiP && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
       try {
         val builder = PictureInPictureParams.Builder()
         val aspectRatio = Rational(4, 3)

@@ -28,6 +28,12 @@ const AD_LOAD_FALLBACK_MS = 3000;
  */
 let nativeBridgeNonce: string | null = null;
 
+/** Messages (AD_LOADED / AD_DISMISSED) that arrived before BRIDGE_INIT
+ *  had a chance to set nativeBridgeNonce. They are held here and flushed
+ *  once the nonce is known, closing the race between native injecting
+ *  BRIDGE_INIT and the ad WebView firing onLoadEnd. */
+const pendingMessages: Array<{ type: "AD_LOADED" | "AD_DISMISSED"; linkId: string; nonce: string }> = [];
+
 function parseNativeMessage(event: { data: unknown }): any {
   try {
     let data = event.data;
@@ -73,6 +79,22 @@ export function AdContainer() {
       const data = parseNativeMessage(event);
       if (data && data.type === "BRIDGE_INIT" && typeof data.nonce === "string" && data.nonce) {
         nativeBridgeNonce = data.nonce;
+        // Flush any AD_LOADED / AD_DISMISSED messages that arrived before
+        // the nonce was set (race between native inject & ad WebView load).
+        if (pendingMessages.length > 0) {
+          const valid = pendingMessages.filter((m) => m.nonce === nativeBridgeNonce);
+          pendingMessages.length = 0;
+          for (const msg of valid) {
+            if (msg.type === "AD_LOADED") {
+              const ad = useAdStore.getState().active.find((a) => a.linkId === msg.linkId);
+              if (ad && ad.startedAt === 0) {
+                useAdStore.getState().markLoaded(msg.linkId);
+              }
+            } else if (msg.type === "AD_DISMISSED") {
+              useAdStore.getState().dismiss(msg.linkId);
+            }
+          }
+        }
       }
     };
     window.addEventListener("message", handleBridgeInit);
@@ -258,7 +280,19 @@ function AdModal({
         // BRIDGE_INIT).  Previously the FIRST ad-message with any nonce
         // would blindly overwrite a null nativeBridgeNonce — this let
         // any page script forge an AD_LOADED and defeat the handshake.
-        if (!nativeBridgeNonce) return;          // BRIDGE_INIT hasn't arrived yet
+        if (!nativeBridgeNonce) {
+          // BRIDGE_INIT hasn't arrived yet — buffer the message instead
+          // of silently dropping it. It will be flushed once the nonce
+          // is set (see BRIDGE_INIT handler above).
+          if (typeof data.nonce === "string" && data.nonce && typeof data.linkId === "string") {
+            pendingMessages.push({
+              type: data.type as "AD_LOADED" | "AD_DISMISSED",
+              linkId: data.linkId,
+              nonce: data.nonce,
+            });
+          }
+          return;
+        }
         if (!data.nonce || typeof data.nonce !== "string") return;
         if (data.nonce !== nativeBridgeNonce) return;
       } else if (data.type === "HEARTBEAT") {

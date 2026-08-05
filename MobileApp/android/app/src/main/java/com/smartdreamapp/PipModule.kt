@@ -42,6 +42,15 @@ class PipModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
         }
     }
 
+    /** Lets the JS layer tell native whether auto-like is currently active.
+     *  PiP auto-enter (onUserLeaveHint) checks this so the PiP window stays
+     *  available even during the brief gap between auto-like batches where
+     *  all 3 display slots happen to be empty. */
+    @ReactMethod
+    fun setAutoLikeActive(active: Boolean) {
+        isAutoLikeActive = active
+    }
+
     @ReactMethod
     fun enterPiP() {
         val activity = reactApplicationContext.currentActivity ?: return
@@ -49,7 +58,6 @@ class PipModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
             activity.runOnUiThread {
                 try {
                     val builder = PictureInPictureParams.Builder()
-                    // Use a 4:3 aspect ratio which works well for the ads container
                     val aspectRatio = Rational(4, 3)
                     builder.setAspectRatio(aspectRatio)
                     if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
@@ -66,6 +74,7 @@ class PipModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     companion object {
         private var instance: PipModule? = null
         var isPiPEnabled: Boolean = false
+        var isAutoLikeActive: Boolean = false
 
         fun sendPiPModeChangedEvent(reactContext: ReactApplicationContext?, isInPiP: Boolean) {
             val params = Arguments.createMap()
