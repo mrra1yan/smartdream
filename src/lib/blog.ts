@@ -1,7 +1,7 @@
 import "server-only";
 import { cache } from "react";
 import { unstable_cache } from "next/cache";
-import type { Blog } from "@/lib/supabase";
+import type { Blog } from "@/lib/repos/blogs";
 import {
   getBlogById as repoGetBlogById,
   getBlogBySlug as repoGetBlogBySlug,
@@ -10,7 +10,7 @@ import {
   type BlogRow,
 } from "@/lib/repos/blogs";
 
-export { type Blog } from "@/lib/supabase";
+export type { Blog } from "@/lib/repos/blogs";
 
 // unstable_cache (not just React's cache() below) because both /blog and
 // /blog/[slug] live under (main)/layout.tsx, which calls requireUser() —

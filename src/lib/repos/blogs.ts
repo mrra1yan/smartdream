@@ -1,12 +1,25 @@
 import "server-only";
 import { pool, toIso } from "@/lib/db";
 
-/** blogs table repository. Rows match the old supabase `Blog` shape. */
+/** blogs table repository. */
 
 export type BlogRow = {
   id: string;
   title: string | null;
   slug: string | null;
+  excerpt: string | null;
+  content: string | null;
+  hero_image: string | null;
+  published_at: string | null;
+  created_by: string | null;
+  created_at: string;
+};
+
+/** Public-facing Blog type (mirrors BlogRow with non-null title/slug). */
+export type Blog = {
+  id: string;
+  title: string;
+  slug: string;
   excerpt: string | null;
   content: string | null;
   hero_image: string | null;
