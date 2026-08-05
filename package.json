@@ -8,11 +8,9 @@
     "start": "next start",
     "lint": "eslint",
     "db:up": "docker compose up -d",
-    "db:migrate": "node scripts/migrate.mjs up",
-    "db:status": "node scripts/migrate.mjs status",
+    "db:setup": "node scripts/setup.mjs",
     "db:test": "node scripts/test-concurrency.mjs",
-    "db:smoke": "node scripts/smoke-test.mjs",
-    "db:seed": "node scripts/migrate-data.mjs"
+    "db:smoke": "node scripts/smoke-test.mjs"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

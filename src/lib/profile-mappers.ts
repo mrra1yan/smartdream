@@ -3,7 +3,7 @@ import type { AdminProfile } from "@/lib/types";
 
 /**
  * Map a profiles row (snake_case columns) to the app-facing `AdminProfile`
- * (camelCase). MySQL rows come back in the database's snake_case; this is
+ * (camelCase). Database rows come back in snake_case; this is
  * the only correct way to bridge that to the UI types.
  *
  * Mirrors the field mapping in `getCurrentUser` (`src/lib/auth.ts`).

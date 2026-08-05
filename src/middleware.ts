@@ -26,7 +26,7 @@ import { getJwtSecret } from "@/lib/jwt-secret";
  *      getCurrentUser() (src/lib/auth.ts), which re-reads the DB.
  *
  * No DB/Redis here on purpose: Edge runtime has no TCP sockets for
- * mysql2/ioredis, and the JWT-only fast path is what keeps auth-page loads
+ * pg/ioredis, and the JWT-only fast path is what keeps auth-page loads
  * zero-network.
  */
 

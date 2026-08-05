@@ -45,7 +45,7 @@ export async function updateProfile(_state: ProfileFormState, formData: FormData
 
   // Friendly early-exit for the common case; the unique index on the phone
   // generated column (profiles.phone_key) is the authoritative guard — a
-  // concurrent duplicate fails the UPDATE below with ER_DUP_ENTRY (1062).
+  // concurrent duplicate fails the UPDATE below with UNIQUE violation (23505).
   const existingPhone = await findProfileByPhone(parsed.data.phone);
   if (existingPhone && existingPhone.id !== user.id) {
     return { errors: { phone: ["Phone number already in use."] } };
@@ -58,7 +58,9 @@ export async function updateProfile(_state: ProfileFormState, formData: FormData
       phone: parsed.data.phone,
     });
   } catch (err) {
-    if ((err as { errno?: number })?.errno === 1062) {
+    // PostgreSQL UNIQUE violation (23505) or legacy MySQL (1062)
+    if ((err as { code?: string; errno?: number })?.code === "23505" ||
+        (err as { errno?: number })?.errno === 1062) {
       return { errors: { phone: ["Phone number already in use."] } };
     }
     console.error("updateProfile error:", err);

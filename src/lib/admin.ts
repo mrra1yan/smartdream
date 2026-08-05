@@ -249,8 +249,7 @@ export const getReferralStats = cache(
   },
 );
 
-// Backed by the next_boost_order() procedure + boost_order_seq table (the
-// MySQL port of the pg sequence). Falls back to the previous non-atomic
+// Backed by the boost_order_seq PostgreSQL sequence. Falls back to the previous non-atomic
 // approach if the procedure isn't available, so callers don't hard-fail.
 export async function nextBoostOrder(): Promise<number> {
   try {

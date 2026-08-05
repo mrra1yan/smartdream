@@ -1,26 +1,19 @@
 #!/usr/bin/env node
 /**
- * Smoke test — proves every stored procedure in db/migrations/0002_rpcs.sql
- * runs on a real MySQL 8 instance (syntax + execution + result shapes).
- * This is the FIRST thing to run on the VPS after `npm run db:migrate`,
- * because the procedure SQL has never executed anywhere yet.
+ * Smoke test — proves every PL/pgSQL function in db/setup.sql runs on a
+ * real PostgreSQL 16 instance (syntax + execution + result shapes).
  *
  *   npm run db:smoke
  *
  * Self-contained: creates its own test rows and cleans up. Safe to run
  * against an empty or populated database.
  */
+import pg from "pg";
+import { randomUUID } from "node:crypto";
 
-import { createConnection } from "mysql2/promise";
-
-const MYSQL = {
-  host: process.env.MYSQL_HOST ?? "127.0.0.1",
-  port: Number(process.env.MYSQL_PORT ?? 3306),
-  user: process.env.MYSQL_USER ?? "smartdream",
-  password: process.env.MYSQL_PASSWORD ?? "smartdream_dev_password",
-  database: process.env.MYSQL_DATABASE ?? "smartdream",
-  timezone: "Z",
-};
+const connectionString =
+  process.env.DATABASE_URL ??
+  "postgresql://smartdream:smartdream_dev_password@127.0.0.1:5432/smartdream";
 
 const results = [];
 function record(name, ok, detail = "") {
@@ -29,111 +22,106 @@ function record(name, ok, detail = "") {
 }
 
 async function main() {
-  const conn = await createConnection(MYSQL);
+  const pool = new pg.Pool({ connectionString, max: 1 });
   const prefix = `smoke-${Date.now()}-`;
-  const uid = () => crypto.randomUUID();
+  const uid = () => randomUUID();
   const now = new Date();
   const userId = uid();
   const linkId = uid();
 
   try {
-    // ---- sanity: migrations applied ----
-    const [[mig]] = await conn.query(
-      "SELECT COUNT(*) AS n FROM schema_migrations",
+    // ---- sanity: tables exist ----
+    const { rows: tableRows } = await pool.query(
+      "SELECT tablename FROM pg_catalog.pg_tables WHERE schemaname = 'public' AND tablename IN ('profiles','links','likes','blogs','settings','audit_log','feed_eligibility_cache')"
     );
-    record("schema_migrations applied", mig.n >= 2, `${mig.n} migration(s)`);
+    const tableNames = tableRows.map((r) => r.tablename);
+    record("core tables exist", tableNames.length >= 7, `${tableNames.length} tables found`);
+
+    // ---- sanity: functions exist ----
+    const { rows: funcRows } = await pool.query(
+      "SELECT proname FROM pg_proc WHERE pronamespace = 'public'::regnamespace AND proname IN ('add_links_atomic','get_my_stats','get_top_likers','refresh_feed_eligibility_cache','get_eligible_feed_links','process_like_commit')"
+    );
+    const funcNames = funcRows.map((r) => r.proname);
+    record("PL/pgSQL functions exist", funcNames.length >= 6, `${funcNames.length} functions found`);
 
     // ---- seed two profiles + a link ----
-    await conn.query(
+    await pool.query(
       `INSERT INTO profiles (id, public_id, first_name, last_name, phone, email, password_hash, role, status, created_at)
-       VALUES (?, ?, 'Smoke', 'User', '9990000001', ?, NULL, 'user', 'approved', ?)`,
+       VALUES ($1, $2, 'Smoke', 'User', '9990000001', $3, NULL, 'user', 'approved', $4)`,
       [userId, prefix + "u1", prefix + "u1@test.local", now],
     );
-    await conn.query(
+    const ownerId = uid();
+    await pool.query(
       `INSERT INTO profiles (id, public_id, first_name, last_name, phone, email, password_hash, role, status, is_elite, created_at)
-       VALUES (?, ?, 'Owner', 'Elite', '9990000002', ?, NULL, 'user', 'approved', 1, ?)`,
-      [uid(), prefix + "u2", prefix + "u2@test.local", now],
+       VALUES ($1, $2, 'Owner', 'Elite', '9990000002', $3, NULL, 'user', 'approved', TRUE, $4)`,
+      [ownerId, prefix + "u2", prefix + "u2@test.local", now],
     );
-    await conn.query(
-      "INSERT INTO links (id, user_id, url, likes_count, sort_order) VALUES (?, ?, ?, 0, 0)",
+    await pool.query(
+      "INSERT INTO links (id, user_id, url, likes_count, sort_order) VALUES ($1, $2, $3, 0, 0)",
       [linkId, userId, "https://smoke.test/a"],
     );
 
-    // ---- next_boost_order (OUT param) ----
-    const boostOrder = await callOut(conn, "CALL next_boost_order(@r)");
-    record("next_boost_order", typeof boostOrder === "number" && boostOrder > 0, `→ ${boostOrder}`);
+    // ---- boost_order_seq (sequence, replaces MySQL next_boost_order) ----
+    const { rows: [seqRow] } = await pool.query("SELECT nextval('boost_order_seq') AS result");
+    const boostOrder = seqRow.result;
+    record("boost_order_seq", typeof boostOrder === "number" && boostOrder > 0, `→ ${boostOrder}`);
 
-    // ---- add_links_atomic (JSON rows, OUT param) ----
-    const inserted = await callOut(
-      conn,
-      "CALL add_links_atomic(?, ?, ?, @r)",
-      [userId, JSON.stringify([{ id: uid(), url: "https://smoke.test/b" }]), 20],
+    // ---- add_links_atomic (JSONB rows, returns inserted count) ----
+    const newLinkId = uid();
+    const { rows: [addRow] } = await pool.query(
+      "SELECT add_links_atomic($1, $2::JSONB, $3) AS result",
+      [userId, JSON.stringify([{ id: newLinkId, url: "https://smoke.test/b" }]), 20],
     );
+    const inserted = Number(addRow.result);
     record("add_links_atomic", inserted === 1, `inserted ${inserted}`);
 
     // ---- process_like_commit (full pipeline) ----
-    const committed = await callOut(
-      conn,
-      "CALL process_like_commit(?,?,?,?,?,?,?,?,?,?,?,@r)",
-      [userId, linkId, userId, 0, 0, 0, 10, 30, 24, 20, new Date()],
+    const { rows: [commitRow] } = await pool.query(
+      "SELECT process_like_commit($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) AS result",
+      [userId, linkId, userId, false, false, false, 10, 30, 24, 20, now],
     );
+    const committed = Number(commitRow.result);
     record("process_like_commit", committed === 1, committed ? "committed" : "rejected");
 
-    // ---- get_my_stats (result-set proc) ----
-    const statsRows = await callRows(conn, "CALL get_my_stats(?, ?, ?)", [
-      userId,
-      new Date(Date.now() - 86400000),
-      new Date(Date.now() - 86400000),
-    ]);
+    // ---- get_my_stats (table-returning function) ----
+    const yesterday = new Date(Date.now() - 86400000);
+    const { rows: statsRows } = await pool.query(
+      "SELECT * FROM get_my_stats($1, $2, $3)",
+      [userId, now, yesterday],
+    );
     record(
       "get_my_stats",
       Array.isArray(statsRows) && statsRows.length === 1 && "given_today" in (statsRows[0] ?? {}),
       JSON.stringify(statsRows[0] ?? {}),
     );
 
-    // ---- get_top_likers (result-set proc) ----
-    const topLikers = await callRows(conn, "CALL get_top_likers(5)");
+    // ---- get_top_likers (table-returning function) ----
+    const { rows: topLikers } = await pool.query("SELECT * FROM get_top_likers(5)");
     record("get_top_likers", Array.isArray(topLikers), `${topLikers.length} row(s)`);
 
     // ---- refresh_feed_eligibility_cache + get_eligible_feed_links ----
-    await conn.query("CALL refresh_feed_eligibility_cache()");
-    const feed = await callRows(conn, "CALL get_eligible_feed_links(?, ?, ?, ?, ?, ?)", [
-      uid(), 20, 24, 12, 50, 0,
-    ]);
+    await pool.query("SELECT refresh_feed_eligibility_cache()");
+    const { rows: feed } = await pool.query(
+      "SELECT * FROM get_eligible_feed_links($1, $2, $3, $4, $5, $6)",
+      [uid(), 20, 24, 12, 50, 0],
+    );
     record(
       "get_eligible_feed_links",
       Array.isArray(feed) && feed.every((r) => "id" in r && "is_boosted" in r),
       `${feed.length} row(s)`,
     );
 
-    // ---- events registered ----
-    const [[ev]] = await conn.query(
-      "SELECT COUNT(*) AS n FROM information_schema.events WHERE event_schema = DATABASE()",
-    );
-    record("scheduled events", Number(ev.n) >= 3, `${ev.n} event(s)`);
-
     const failed = results.filter((r) => !r.ok).length;
-    console.log(failed === 0 ? "\nALL PROCEDURES OK" : `\n${failed} FAILURE(S)`);
+    console.log(failed === 0 ? "\nALL FUNCTIONS OK" : `\n${failed} FAILURE(S)`);
     process.exitCode = failed === 0 ? 0 : 1;
   } catch (err) {
     console.error("\n✗ smoke test crashed:", err.message ?? err);
     process.exitCode = 1;
   } finally {
-    await conn.query("DELETE FROM profiles WHERE id LIKE ?", [`${prefix}%`]).catch(() => {});
-    await conn.end();
+    await pool.query("DELETE FROM links WHERE id LIKE $1", [`${prefix}%`]).catch(() => {});
+    await pool.query("DELETE FROM profiles WHERE id LIKE $1", [`${prefix}%`]).catch(() => {});
+    await pool.end();
   }
-}
-
-async function callOut(conn, sql, params = []) {
-  await conn.query(sql, params);
-  const [rows] = await conn.query("SELECT @r AS result");
-  return rows[0]?.result ?? null;
-}
-
-async function callRows(conn, sql, params = []) {
-  const [raw] = await conn.query(sql, params);
-  const rows = Array.isArray(raw) ? (raw.length > 0 && Array.isArray(raw[0]) ? raw[0] : raw) : [];
-  return rows;
 }
 
 main();

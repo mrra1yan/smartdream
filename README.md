@@ -38,8 +38,8 @@ A full-stack **ad-view give-and-take platform** built with Next.js 15. Users sha
 | **Framework**    | [Next.js 15](https://nextjs.org) (App Router, Server Components) |
 | **Language**     | TypeScript 5                                                      |
 | **Styling**      | Tailwind CSS 4                                                    |
-| **Database**     | MySQL 8 (self-hosted, docker-compose)                            |
-| **Data access**  | `mysql2` + thin repository layer (`src/lib/repos/*`)             |
+| **Database**     | PostgreSQL 16 (self-hosted or docker-compose)                     |
+| **Data access**  | `pg` + thin repository layer (`src/lib/repos/*`)                 |
 | **Cache/Realtime**| Redis 7 (object cache, rate limiting, pub/sub → SSE)            |
 | **Auth**         | Custom JWT sessions ([jose](https://github.com/panva/jose))       |
 | **Passwords**    | bcryptjs                                                          |
@@ -50,7 +50,7 @@ A full-stack **ad-view give-and-take platform** built with Next.js 15. Users sha
 | **Theming**      | next-themes (light / dark / system)                               |
 | **Validation**   | Zod 4                                                             |
 | **Fonts**        | Geist Sans & Geist Mono (via `next/font/google`)                  |
-| **Deploy**       | VPS (Node) + docker-compose (MySQL 8 + Redis 7)                |
+| **Deploy**       | VPS (Node) + docker-compose (PostgreSQL 16 + Redis 7)            |
 
 ---
 
@@ -87,8 +87,9 @@ A full-stack **ad-view give-and-take platform** built with Next.js 15. Users sha
 │  /api/feed · /api/boosted-feed · /api/auto-like         │
 │  /api/embed-frame · /api/logout · /api/test                │
 ├─────────────────────────────────────────────────────────┤
-│               Drizzle ORM + SQLite / D1                 │
-│  profiles · links · likes · blogs · settings            │
+│               PL/pgSQL Functions (PostgreSQL)                │
+│  process_like_commit · get_eligible_feed_links · add_links_atomic │
+│  get_my_stats · get_top_likers · refresh_feed_eligibility_cache  │
 └─────────────────────────────────────────────────────────┘
 ```
 
@@ -211,9 +212,16 @@ Smart Dream/
 │   │   ├── theme-toggle.tsx     # Dark/light mode toggle
 │   │   └── delete-confirm-modal.tsx
 │   ├── lib/
-│   │   ├── db/
-│   │   │   ├── index.ts         # Unified DB connection (SQLite / D1)
-│   │   │   └── schema.ts        # Drizzle schema definitions
+│   │   ├── db.ts               # PostgreSQL connection pool + query helpers
+│   │   ├── redis.ts            # Redis client + cache helpers
+│   │   ├── repos/              # Repository layer (raw SQL queries)
+│   │   │   ├── rpc.ts          # PL/pgSQL function call wrappers
+│   │   │   ├── profiles.ts     # Profiles CRUD
+│   │   │   ├── links.ts        # Links CRUD
+│   │   │   ├── likes.ts        # Likes queries
+│   │   │   ├── blogs.ts        # Blog post queries
+│   │   │   ├── settings.ts     # Settings queries
+│   │   │   └── audit.ts        # Audit log queries
 │   │   ├── i18n/
 │   │   │   ├── index.ts         # I18n loader + cookie management
 │   │   │   ├── types.ts         # Locale type definitions
@@ -236,12 +244,14 @@ Smart Dream/
 │   │   ├── types.ts             # Shared TypeScript types
 │   │   └── utils.ts             # General utility functions (cn, etc.)
 │   └── middleware.ts            # Edge middleware (JWT, RBAC, session refresh)
-├── data/                        # Local SQLite database (gitignored)
-├── drizzle/
-│   └── migrations/              # SQL migration files
-├── drizzle.config.ts            # Drizzle Kit configuration
-├── wrangler.toml                # Cloudflare Workers/Pages config
+├── db/
+│   └── setup.sql                 # PostgreSQL 16 schema + PL/pgSQL functions
+├── scripts/                      # DB utility scripts
+│   ├── setup.mjs                 # Run db/setup.sql
+│   ├── smoke-test.mjs            # PL/pgSQL function smoke tests
+│   └── test-concurrency.mjs      # Like concurrency + quota tests
 ├── next.config.ts               # Next.js configuration
+├── docker-compose.yml           # PostgreSQL 16 + Redis 7
 ├── package.json
 ├── tsconfig.json
 └── .env.example                 # Environment variables template
@@ -266,22 +276,31 @@ cd "Smart Dream"
 # 2. Install dependencies
 npm install
 
-# 3. Start MySQL 8 + Redis 7 (Docker)
+# 3. Start PostgreSQL 16 + Redis 7 (Docker)
 npm run db:up
 
 # 4. Set up environment variables
 cp .env.example .env.local
-# Edit .env.local and set your JWT_SECRET (and MySQL/Redis credentials if you
-# changed them from the docker-compose defaults)
+# Edit .env.local and set your JWT_SECRET
 
-# 5. Apply database migrations (schema + stored procedures + events)
-npm run db:migrate
+# 5. Run database setup (schema + PL/pgSQL functions)
+npm run db:setup
 
 # 6. Start the development server
 npm run dev
 ```
 
 The app will be available at [http://localhost:3000](http://localhost:3000).
+
+### Running Without Docker
+
+If you prefer to run PostgreSQL and Redis natively:
+
+1. Install **PostgreSQL 16** and **Redis 7** on your machine.
+2. Create a database named `smartdream` with user/password `smartdream` / `smartdream_dev_password`.
+3. Update `DATABASE_URL` in `.env.local` to point to your PostgreSQL instance.
+4. Run `npm run db:setup` to create all tables and functions.
+5. Run `npm run dev`.
 
 ### Available Scripts
 
@@ -291,11 +310,10 @@ The app will be available at [http://localhost:3000](http://localhost:3000).
 | `npm run build`   | Create production build                  |
 | `npm run start`   | Start production server                  |
 | `npm run lint`    | Run ESLint                               |
-| `npm run db:up`   | Start MySQL + Redis containers           |
-| `npm run db:migrate` | Apply pending migrations (`db/migrations/*.sql`) |
-| `npm run db:status`  | List applied/pending migrations      |
-| `npm run db:test`    | Run the like-concurrency/quota test |
-| `npm run db:seed`    | One-time data migration from the old Supabase |
+| `npm run db:up`   | Start PostgreSQL + Redis containers      |
+| `npm run db:setup`| Run `db/setup.sql` (idempotent)          |
+| `npm run db:test` | Run the like-concurrency/quota test      |
+| `npm run db:smoke`| Run PL/pgSQL function smoke tests        |
 
 ---
 
@@ -306,23 +324,25 @@ Create a `.env.local` file in the project root. See `.env.example` for the templ
 | Variable                | Required | Description                                                 |
 | ----------------------- | -------- | ----------------------------------------------------------- |
 | `JWT_SECRET`            | **Yes** (prod) | Secret key for signing JWT session cookies. In dev, defaults to `dev-secret-change-me`. |
-| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DATABASE` / `MYSQL_USER` / `MYSQL_PASSWORD` | Yes | MySQL connection (docker-compose defaults in `.env.example`). |
+| `DATABASE_URL`          | Yes      | PostgreSQL connection string (e.g. `postgresql://smartdream:smartdream_dev_password@127.0.0.1:5432/smartdream`). |
 | `REDIS_URL`             | Yes      | Redis connection string (e.g. `redis://127.0.0.1:6379`).     |
 | `SESSION_COOKIE_NAME`   | No       | Session cookie name (default `sd_session`).                 |
+| `PG_POOL_MAX`           | No       | PostgreSQL pool max connections (default 20).               |
+| `PG_CONNECT_TIMEOUT_MS` | No       | PostgreSQL connection timeout in ms (default 10000).        |
 
-> **Production (VPS):** Set `JWT_SECRET` and the MySQL/Redis credentials as environment variables on the Node process. `npm run build && npm run start` (or a process manager like PM2/systemd).
+> **Production (VPS):** Set `JWT_SECRET` and the PostgreSQL/Redis credentials as environment variables on the Node process. `npm run build && npm run start` (or a process manager like PM2/systemd).
 
 ---
 
 ## Database
 
-### MySQL 8 (docker-compose)
+### PostgreSQL 16
 
-The data layer lives in `src/lib/db.ts` (connection pool) and `src/lib/repos/*` (thin repositories mapping rows 1:1 onto the old Supabase row shapes). The schema + stored procedures + scheduled events are plain numbered `.sql` files in `db/migrations/`, applied by `scripts/migrate.mjs` (tracked in `schema_migrations`).
+The data layer lives in `src/lib/db.ts` (connection pool using `pg`) and `src/lib/repos/*` (thin repositories mapping rows 1:1). The schema + PL/pgSQL functions are in `db/setup.sql` (single idempotent file, safe to run multiple times).
 
-- **Stored procedures** (`db/migrations/0002_rpcs.sql`) port the old Postgres RPCs: `process_like_commit` (named locks + atomic quota ceilings), `get_eligible_feed_links` (joins the `feed_eligibility_cache` table), `get_my_stats`, `add_links_atomic`, `next_boost_order`, `get_top_likers`, `refresh_feed_eligibility_cache` (EVENT every 120s).
+- **PL/pgSQL functions** port the old MySQL stored procedures: `process_like_commit` (advisory locks + atomic quota ceilings), `get_eligible_feed_links` (joins the `feed_eligibility_cache` table), `get_my_stats`, `add_links_atomic`, `get_top_likers`, `refresh_feed_eligibility_cache`.
 - **Realtime** is Redis pub/sub → SSE (`/api/realtime`, Node runtime).
-- **Backups:** `mysqldump` on a cron (e.g. `mysqldump smartdream | gzip > /backups/sd-$(date +%F).sql.gz`). Redis is optional to back up (cache only).
+- **Backups:** `pg_dump smartdream | gzip > /backups/sd-$(date +%F).sql.gz`. Redis is optional to back up (cache only).
 
 ### Schema
 
@@ -331,96 +351,96 @@ The core user table. Stores credentials, role, approval status, premium feature 
 
 | Column                    | Type     | Description                                              |
 | ------------------------- | -------- | -------------------------------------------------------- |
-| `id`                      | TEXT PK  | Internal UUID                                            |
-| `public_id`               | TEXT UQ  | Human-facing unique ID (used for feature activation)     |
-| `first_name`              | TEXT     | User's first name                                        |
-| `last_name`               | TEXT     | User's last name                                         |
-| `phone`                   | TEXT     | Phone number                                             |
-| `email`                   | TEXT UQ  | Login email (unique)                                     |
-| `password_hash`           | TEXT     | bcrypt hash                                              |
-| `role`                    | ENUM     | `user` \| `admin` \| `super_admin`                       |
-| `status`                  | ENUM     | `pending` \| `approved` \| `rejected`                    |
+| `id`                      | UUID PK  | Internal UUID                                            |
+| `public_id`               | VARCHAR  | Human-facing unique ID (used for feature activation)     |
+| `first_name`              | VARCHAR  | User's first name                                        |
+| `last_name`               | VARCHAR  | User's last name                                         |
+| `phone`                   | VARCHAR  | Phone number (unique where not null)                     |
+| `email`                   | VARCHAR  | Login email (unique where not null, case-insensitive)    |
+| `password_hash`           | VARCHAR  | bcrypt hash                                              |
+| `role`                    | VARCHAR  | `user` \| `admin` \| `super_admin`                       |
+| `status`                  | VARCHAR  | `pending` \| `approved` \| `rejected`                    |
 | `is_elite`                | BOOLEAN  | Elite flag (Super Admin only)                            |
 | `is_boosted`              | BOOLEAN  | Boosted feature active                                   |
-| `boost_order`             | INTEGER  | Boost priority in feed                                   |
-| `boost_model`             | ENUM     | `none` \| `no_expiry` \| `time` \| `usage`               |
-| `boost_expiry`            | TEXT     | ISO timestamp for time-based boost expiry                |
+| `boost_order`             | INTEGER  | Boost priority in feed (from `boost_order_seq`)          |
+| `boost_model`             | VARCHAR  | `none` \| `no_expiry` \| `time` \| `usage`               |
+| `boost_expiry`            | TIMESTAMPTZ | ISO timestamp for time-based boost expiry            |
 | `boost_quota` / `boost_used` | INT  | Usage-based boost counters                               |
 | `auto_like_enabled`       | BOOLEAN  | Paid auto-like active                                    |
-| `auto_like_model`         | ENUM     | Same model variants as boost                             |
-| `auto_like_expiry`        | TEXT     | ISO timestamp for time-based auto-like expiry            |
+| `auto_like_model`         | VARCHAR  | Same model variants as boost                             |
+| `auto_like_expiry`        | TIMESTAMPTZ | ISO timestamp for time-based auto-like expiry        |
 | `auto_like_quota` / `auto_like_used` | INT | Usage-based auto-like counters              |
 | `auto_like_paused`        | BOOLEAN  | Whether auto-like is currently paused                    |
 | `auto_like_paused_remaining_minutes` | INT | Remaining minutes when paused               |
-| `free_autolike_until`     | TEXT     | ISO timestamp for free auto-like from boosted offer      |
+| `free_autolike_until`     | TIMESTAMPTZ | ISO timestamp for free auto-like from boosted offer  |
 | `free_autolike_paused_remaining_minutes` | INT | Free auto-like remaining when paused     |
 | `boosted_offer_count`     | INTEGER  | Counter for boosted offer progress                       |
-| `referred_by`             | TEXT     | Public ID of the referrer                                |
-| `approved_by`             | TEXT     | ID of admin who approved the user                        |
-| `created_at`              | TEXT     | ISO timestamp                                            |
+| `referred_by`             | UUID FK  | ID of the referrer (SET NULL on delete)                  |
+| `approved_by`             | UUID FK  | ID of admin who approved the user (SET NULL on delete)   |
+| `created_at`              | TIMESTAMPTZ | ISO timestamp (default NOW())                        |
 
-**Indexes:** `(role, status)`, `(is_elite)`, `(boost_order)`
+**Indexes:** `(phone) WHERE phone IS NOT NULL`, `(LOWER(email)) WHERE email IS NOT NULL`, `(public_id)`, `(status, role, is_elite)`, `(referred_by)`, `(is_elite)`, `(is_boosted, boost_order)`
 
 #### `links`
 Each user can add up to 20 Adsterra ad-viewer links.
 
-| Column       | Type     | Description                        |
-| ------------ | -------- | ---------------------------------- |
-| `id`         | TEXT PK  | UUID                               |
-| `user_id`    | TEXT FK  | References `profiles.id` (CASCADE) |
-| `url`        | TEXT     | The ad-viewer URL                  |
-| `likes_count`| INTEGER  | Total likes received               |
-| `sort_order` | INTEGER  | User-defined display order         |
-| `created_at` | TEXT     | ISO timestamp                      |
+| Column       | Type        | Description                        |
+| ------------ | ----------- | ---------------------------------- |
+| `id`         | UUID PK     | UUID                               |
+| `user_id`    | UUID FK     | References `profiles.id` (CASCADE) |
+| `url`        | TEXT        | The ad-viewer URL                  |
+| `likes_count`| INTEGER     | Total likes received               |
+| `sort_order` | BIGINT      | User-defined display order         |
+| `created_at` | TIMESTAMPTZ | ISO timestamp (default NOW())      |
 
-**Indexes:** `(user_id)`, unique `(user_id, sort_order)`
+**Indexes:** `(user_id)`, `(user_id, sort_order)`
 
 #### `likes`
 Records every like (ad view) event with full attribution.
 
-| Column          | Type     | Description                             |
-| --------------- | -------- | --------------------------------------- |
-| `id`            | TEXT PK  | UUID                                    |
-| `liker_id`      | TEXT FK  | Who gave the like (SET NULL on delete)  |
-| `link_id`       | TEXT FK  | Which link was liked (CASCADE)          |
-| `receiver_id`   | TEXT FK  | Who owns the link (CASCADE)            |
-| `is_anonymous`  | BOOLEAN  | True for elite user likes               |
-| `is_boosted_like`| BOOLEAN | True for boosted-page likes             |
-| `created_at`    | TEXT     | ISO timestamp                           |
+| Column          | Type        | Description                             |
+| --------------- | ----------- | --------------------------------------- |
+| `id`            | UUID PK     | UUID (default `gen_random_uuid()`)      |
+| `liker_id`      | UUID FK     | Who gave the like (SET NULL on delete)  |
+| `link_id`       | UUID FK     | Which link was liked (CASCADE)          |
+| `receiver_id`   | UUID FK     | Who owns the link (CASCADE)            |
+| `is_anonymous`  | BOOLEAN     | True for elite user likes               |
+| `is_boosted_like`| BOOLEAN    | True for boosted-page likes             |
+| `created_at`    | TIMESTAMPTZ | ISO timestamp (default NOW())           |
 
-**Indexes:** `(liker_id, created_at)`, `(receiver_id, created_at)`, `(link_id)`
+**Indexes:** `(liker_id, created_at)`, `(receiver_id, created_at)`, `(liker_id, link_id, created_at)`, `(receiver_id, is_boosted_like)`
 
 #### `blogs`
 Admin-managed blog posts displayed in the hero carousel and blog pages.
 
-| Column        | Type     | Description                        |
-| ------------- | -------- | ---------------------------------- |
-| `id`          | TEXT PK  | UUID                               |
-| `title`       | TEXT     | Post title                         |
-| `slug`        | TEXT UQ  | URL slug                           |
-| `excerpt`     | TEXT     | Short summary                      |
-| `content`     | TEXT     | Full content (markdown/HTML)       |
-| `hero_image`  | TEXT     | Base64 or URL for hero image       |
-| `published_at`| TEXT     | Publish timestamp                  |
-| `created_by`  | TEXT FK  | Admin who created it               |
-| `created_at`  | TEXT     | ISO timestamp                      |
+| Column        | Type        | Description                        |
+| ------------- | ----------- | ---------------------------------- |
+| `id`          | UUID PK     | UUID                               |
+| `title`       | VARCHAR     | Post title                         |
+| `slug`        | VARCHAR     | URL slug (unique where not null)   |
+| `excerpt`     | TEXT        | Short summary                      |
+| `content`     | TEXT        | Full content (markdown/HTML)       |
+| `hero_image`  | TEXT        | Base64 or URL for hero image       |
+| `published_at`| TIMESTAMPTZ | Publish timestamp                  |
+| `created_by`  | UUID FK     | Admin who created it               |
+| `created_at`  | TIMESTAMPTZ | ISO timestamp (default NOW())      |
 
 #### `settings` (Singleton, `id = "1"`)
 Global platform configuration, managed by admins.
 
 | Column                          | Type    | Default | Description                              |
 | ------------------------------- | ------- | ------- | ---------------------------------------- |
-| `whatsapp_number`               | TEXT    | `""`    | WhatsApp contact shown across the site   |
-| `active_like_count`             | INT     | `20`    | Likes needed in rolling window to be "active" |
-| `active_window_hours`           | INT     | `24`    | Rolling window size in hours             |
-| `elite_weight`                  | INT     | `10`    | Elite user priority boost (in hours)     |
-| `offer_likes_required`          | INT     | `10`    | Boosted likes needed for free auto-like  |
-| `offer_autolike_minutes`        | INT     | `30`    | Free auto-like duration from offer       |
-| `offer_active`                  | BOOL    | `true`  | Whether the boosted offer is enabled     |
-| `boost_price_*`                 | REAL    | `null`  | Pricing for each boost variation         |
-| `autolike_price_*`              | REAL    | `null`  | Pricing for each auto-like variation     |
-| `referral_reward_referrer_minutes` | INT  | `60`    | Free auto-like minutes for referrer      |
-| `referral_reward_referee_minutes`  | INT  | `30`    | Free auto-like minutes for referee       |
+| `whatsapp_number`               | TEXT    | `NULL`  | WhatsApp contact shown across the site   |
+| `active_like_count`             | INTEGER | `0`     | Likes needed in rolling window to be "active" |
+| `active_window_hours`           | INTEGER | `24`    | Rolling window size in hours             |
+| `elite_weight`                  | INTEGER | `50`    | Elite user priority boost                |
+| `offer_likes_required`          | INTEGER | `100`   | Boosted likes needed for free auto-like  |
+| `offer_autolike_minutes`        | INTEGER | `60`    | Free auto-like duration from offer       |
+| `offer_active`                  | BOOLEAN | `FALSE` | Whether the boosted offer is enabled     |
+| `boost_price_*`                 | INTEGER | `null`  | Pricing for each boost variation         |
+| `autolike_price_*`              | INTEGER | `null`  | Pricing for each auto-like variation     |
+| `referral_reward_referrer_minutes` | INT  | `1440`  | Free auto-like minutes for referrer      |
+| `referral_reward_referee_minutes`  | INT  | `720`   | Free auto-like minutes for referee       |
 | `level[1-4]_name`              | TEXT    | Bronze/Silver/Gold/Platinum | Level tier names    |
 | `level[1-4]_threshold`         | INT     | 0/100/500/2000 | Like thresholds for each level |
 
@@ -749,8 +769,8 @@ Excludes static files, images, and Next.js internal routes.
 
 ### Local Development
 ```bash
-npm run db:up        # MySQL 8 + Redis 7 containers
-npm run db:migrate   # schema + stored procedures + events
+npm run db:up        # PostgreSQL 16 + Redis 7 containers
+npm run db:setup     # schema + PL/pgSQL functions
 npm run dev
 ```
 
@@ -760,10 +780,10 @@ npm run dev
 npm install
 npm run build
 
-# 2. Start MySQL + Redis (docker-compose.yml) and set env vars
-#    (JWT_SECRET, MYSQL_*, REDIS_URL — see .env.example)
+# 2. Start PostgreSQL + Redis (docker-compose.yml) and set env vars
+#    (JWT_SECRET, DATABASE_URL, REDIS_URL — see .env.example)
 npm run db:up
-npm run db:migrate
+npm run db:setup
 
 # 3. Run the Node server behind nginx/pm2/systemd
 npm run start
@@ -774,7 +794,7 @@ npm run start
   `location /api/realtime { proxy_buffering off; proxy_read_timeout 3600s; proxy_http_version 1.1; proxy_set_header Connection ""; }`
 - Set `client_max_body_size` to match `next.config.ts`'s 10 MB server-actions limit.
 
-**Backups:** daily `mysqldump smartdream | gzip` (schema + data). Redis is a cache — no backup needed.
+**Backups:** daily `pg_dump smartdream | gzip` (schema + data). Redis is a cache — no backup needed.
 
 ---
 
@@ -793,7 +813,7 @@ These are defined in `src/lib/types.ts` and used throughout the application:
 | Constant   | Value     | Description                |
 | ---------- | --------- | -------------------------- |
 | `MAX_AGE`  | 7 days    | Session cookie max age     |
-| `COOKIE`   | `session` | Cookie name for JWT        |
+| `COOKIE`   | `sd_session` | Cookie name for JWT        |
 
 ### Rate Limit Constants
 | Constant       | Value       | Description                  |

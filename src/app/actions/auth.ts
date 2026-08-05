@@ -208,12 +208,14 @@ export async function signup(_state: AuthFormState, formData: FormData) {
     // The pre-INSERT duplicate checks above are a TOCTOU race window: two
     // concurrent signups can both pass `findProfileByEmail`/`findProfileByPhone`
     // and race into insertProfile(). The schema's UNIQUE constraints on
-    // phone_key (0001) and email_key (0004) are the real backstop — catch
-    // MySQL ER_DUP_ENTRY (1062) here and surface a friendly message matching
+	    // phone_key (0001) and email_key (0004) are the real backstop — catch
+	    // PostgreSQL UNIQUE violation (23505) here and surface a friendly message matching
     // whichever key collided, instead of a generic "unexpected error".
-    const dbErr = err as { errno?: number; code?: string; sqlMessage?: string };
-    if (dbErr.errno === 1062 || dbErr.code === "ER_DUP_ENTRY") {
-      const msg = String(dbErr.sqlMessage ?? "");
+    const dbErr = err as { errno?: number; code?: string; constraint?: string; detail?: string; sqlMessage?: string };
+    // PostgreSQL unique violation: code 23505
+    // MySQL unique violation (legacy): errno 1062 / code ER_DUP_ENTRY
+    if (dbErr.code === "23505" || dbErr.errno === 1062 || dbErr.code === "ER_DUP_ENTRY") {
+      const msg = String(dbErr.detail ?? dbErr.constraint ?? dbErr.sqlMessage ?? "");
       const values = {
         firstName: String(formData.get("firstName") ?? ""),
         lastName: String(formData.get("lastName") ?? ""),
