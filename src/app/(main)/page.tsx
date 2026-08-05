@@ -105,7 +105,7 @@ export default async function HomePage() {
       {/* Welcome Banner — renders immediately */}
       <WelcomeBanner>
         <PageHeader
-          badge={t("home.overview")}
+          badge="TaziMa Helping Hand"
           title={
             <>
               {t("home.welcome")},{" "}

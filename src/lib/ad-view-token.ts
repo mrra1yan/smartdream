@@ -92,9 +92,8 @@ function sweepConsumedJtis(now: number) {
 /** Marks a verified token's `jti` as spent. Returns `true` the first time
  *  it's called for a given `jti` (the caller may proceed), `false` on any
  *  subsequent call for the same `jti` (a replay — the caller must reject).
- *  Call this once, right after a token has passed verification + the
- *  elapsed-view-time check, and before doing any further work on its
- *  behalf. */
+ * Call this once after a token has passed verification and the
+ * elapsed-view-time check, before doing any further work on its behalf. */
 export function consumeAdViewToken(jti: string): boolean {
   const now = Date.now();
   sweepConsumedJtis(now);

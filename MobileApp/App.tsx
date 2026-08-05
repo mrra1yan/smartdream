@@ -99,6 +99,7 @@ const MAX_ERROR_RETRIES = 3;
 function App(): React.JSX.Element {
   const mainWebViewRef = useRef<WebView>(null);
   const [ads, setAds] = useState<AdInfo[]>([]);
+  const [adRefreshEpoch, setAdRefreshEpoch] = useState(0);
   const [updateInfo, setUpdateInfo] = useState<{ isRequired: boolean; url: string; notes: string } | null>(null);
   const [webUrl, setWebUrl] = useState<string>(DEFAULT_WEB_URL);
   const [configError, setConfigError] = useState<boolean>(false);
@@ -166,10 +167,19 @@ function App(): React.JSX.Element {
   const adsRef = useRef<AdInfo[]>([]);
   const appStateRef = useRef<string>(AppState.currentState);
   const autoLikeActiveRef = useRef<boolean>(false);
+  const adRefreshEpochRef = useRef(0);
 
-  // Keep adsRef in sync — done in an effect, not render body, to avoid
-  // stale-ref bugs under React concurrent rendering.
   useEffect(() => { adsRef.current = ads; }, [ads]);
+
+  const updateAds = (nextAds: AdInfo[]) => {
+    adsRef.current = nextAds;
+    setAds(nextAds);
+  };
+
+  const refreshAdWebViews = () => {
+    adRefreshEpochRef.current += 1;
+    setAdRefreshEpoch(adRefreshEpochRef.current);
+  };
 
 	  // ── Load ad URLs directly (no proxy) ─────────────────────────────
 	  // Previously routed through /api/embed-frame proxy for header
@@ -191,7 +201,12 @@ function App(): React.JSX.Element {
     // The HEARTBEAT interval only fires when the app is backgrounded so
     // we don't waste CPU pinging the WebView while the user is active.
     const appStateSub = AppState.addEventListener('change', (nextAppState) => {
+      const previousAppState = appStateRef.current;
       appStateRef.current = nextAppState;
+      if (nextAppState === 'active' && previousAppState !== 'active') {
+        refreshAdWebViews();
+        dispatchToWeb({ type: 'HEARTBEAT' });
+      }
     });
 
     // ── Proactive network monitoring ──────────────────────────────────
@@ -231,7 +246,9 @@ function App(): React.JSX.Element {
   useEffect(() => {
     if (Platform.OS === 'android') {
       const subscription = DeviceEventEmitter.addListener('onPiPModeChanged', (event: any) => {
-        setIsInPiP(event.isInPiP);
+        setIsInPiP(event.isInPiP === true);
+        refreshAdWebViews();
+        dispatchToWeb({ type: 'HEARTBEAT' });
       });
       return () => {
         subscription.remove();
@@ -251,9 +268,8 @@ function App(): React.JSX.Element {
 
   useEffect(() => {
     // Keep WebView timers alive in the background.
-    // By pinging the WebView every second, we force Chromium
-    // to process its JS task queue, bypassing the 1-minute background timer
-    // throttling that would otherwise break the Auto-Like 9-second intervals.
+    // By pinging the WebView every second, we give Chromium a chance
+    // to process its JS task queue while the app is backgrounded.
     const interval = setInterval(() => {
       if (appStateRef.current === 'background' || appStateRef.current === 'inactive') {
         dispatchToWeb({ type: 'HEARTBEAT' });
@@ -353,11 +369,8 @@ function App(): React.JSX.Element {
     try {
       const data = JSON.parse(event.nativeEvent.data);
       if (data.type === 'OPEN_AD') {
-        if (!isHttpUrl(data.url)) {
-          // Defend the bridge itself, independent of the web layer's own
-          // UrlSchema check (src/app/actions/links.ts) -- never load
-          // javascript:/file:/intent:/etc. into the ad WebView.
-          console.log('Rejected OPEN_AD with disallowed URL scheme:', data.url);
+        if (typeof data.linkId !== 'string' || data.linkId.length === 0 || !isHttpUrl(data.url)) {
+          console.log('Rejected OPEN_AD with invalid linkId or URL:', data.linkId, data.url);
           return;
         }
         // Resend BRIDGE_INIT (same nonce -- idempotent, the web side just
@@ -371,23 +384,33 @@ function App(): React.JSX.Element {
         // comes after an OPEN_AD for the same ad, so this ordering
         // guarantees the nonce is set before any dismissal can arrive.
         dispatchToWeb({ type: 'BRIDGE_INIT' });
-        setAds((prev) => {
-          if (prev.find((a) => a.linkId === data.linkId)) return prev;
-          // Keep up to 3 ads concurrently
-          const nextAds = [...prev, { url: data.url, linkId: data.linkId }];
-          if (nextAds.length > 3) {
-            // Tell the web layer these got dropped so their slots don't
-            // hang forever waiting for an AD_LOADED that will never come.
-            const evicted = nextAds.slice(0, nextAds.length - 3);
-            evicted.forEach((ad) => dispatchToWeb({ type: 'AD_DISMISSED', linkId: ad.linkId }));
-            return nextAds.slice(nextAds.length - 3);
-          }
-          return nextAds;
-        });
+        const current = adsRef.current;
+        const existing = current.find((ad) => ad.linkId === data.linkId);
+        if (existing?.url === data.url) return;
+
+        if (existing) {
+          updateAds(current.map((ad) =>
+            ad.linkId === data.linkId ? { url: data.url, linkId: data.linkId } : ad,
+          ));
+          refreshAdWebViews();
+          return;
+        }
+
+        const nextAds = [...current, { url: data.url, linkId: data.linkId }];
+        const evicted = nextAds.length > 3 ? nextAds.slice(0, nextAds.length - 3) : [];
+        updateAds(nextAds.slice(-3));
+        refreshAdWebViews();
+        evicted.forEach((ad) => dispatchToWeb({ type: 'AD_DISMISSED', linkId: ad.linkId }));
       } else if (data.type === 'SYNC_AUTO_LIKE_STATUS') {
         autoLikeActiveRef.current = data.active === true;
       } else if (data.type === 'CLOSE_AD') {
-        setAds((prev) => prev.filter((a) => a.linkId !== data.linkId));
+        const currentAd = adsRef.current.find((a) => a.linkId === data.linkId);
+        if (currentAd && typeof data.url === 'string' && currentAd.url !== data.url) return;
+        const nextAds = adsRef.current.filter((a) => a.linkId !== data.linkId);
+        if (nextAds.length !== adsRef.current.length) {
+          updateAds(nextAds);
+          refreshAdWebViews();
+        }
       } else if (data.type === 'SYNC_ADS') {
         // ── Full ad-state sync from the web layer's HEARTBEAT handler.
         //     When Chromium throttles React re-renders in the background,
@@ -399,18 +422,29 @@ function App(): React.JSX.Element {
         // trusting the array — prevents undefined propagation into
         // closeAdManually / getProxiedAdUrl if a malformed ad slips through.
         const valid = incoming.filter(
-          (a: any) => typeof a?.linkId === 'string' && typeof a?.url === 'string',
+          (a: any) => typeof a?.linkId === 'string' && a.linkId.length > 0 && isHttpUrl(a?.url),
         );
-        const currentIds = new Set(adsRef.current.map((a) => a.linkId));
-        const incomingIds = new Set(valid.map((a) => a.linkId));
+        const unique = valid.filter(
+          (ad, index, list) => list.findIndex((item) => item.linkId === ad.linkId) === index,
+        );
+        const bounded = unique.slice(-3);
+        const current = adsRef.current;
         const changed =
-          currentIds.size !== incomingIds.size ||
-          !Array.from(currentIds).every((id) => incomingIds.has(id));
+          current.length !== bounded.length ||
+          current.some((ad, index) =>
+            ad.linkId !== bounded[index]?.linkId || ad.url !== bounded[index]?.url,
+          );
         if (changed) {
-          setAds(valid);
+          const removed = current.filter(
+            (ad) => !bounded.some((incomingAd) => incomingAd.linkId === ad.linkId),
+          );
+          updateAds(bounded);
+          refreshAdWebViews();
+          removed.forEach((ad) => dispatchToWeb({ type: 'AD_DISMISSED', linkId: ad.linkId }));
         }
       } else if (data.type === 'CLEAR_CACHE') {
-        setAds([]);
+        updateAds([]);
+        refreshAdWebViews();
         if (mainWebViewRef.current) {
           mainWebViewRef.current.clearCache(true);
           mainWebViewRef.current.clearHistory?.();
@@ -424,13 +458,18 @@ function App(): React.JSX.Element {
 
   const closeAdManually = (linkId: string) => {
     dispatchToWeb({ type: 'AD_DISMISSED', linkId });
-    setAds((prev) => prev.filter((a) => a.linkId !== linkId));
+    const nextAds = adsRef.current.filter((a) => a.linkId !== linkId);
+    updateAds(nextAds);
+    refreshAdWebViews();
   };
 
   const renderAdWebView = (ad: AdInfo | null) => {
+    if (!ad) return null;
+
     return (
       <WebViewComponent
-        source={{ uri: ad ? getProxiedAdUrl(ad.url) : 'about:blank' }}
+        key={`${ad.linkId}:${ad.url}:${adRefreshEpoch}`}
+        source={{ uri: getProxiedAdUrl(ad.url) }}
         style={styles.floatingWebView}
         onLoadEnd={() => { if (ad) dispatchToWeb({ type: 'AD_LOADED', linkId: ad.linkId }) }}
         onError={(syntheticEvent: any) => {
@@ -451,20 +490,6 @@ function App(): React.JSX.Element {
             window.alert = function(){};
             window.confirm = function(){ return false; };
             window.prompt = function(){ return null; };
-            window.open = function(){ return null; };
-            try {
-              var _origDefineProperty = Object.defineProperty;
-              Object.defineProperty = function(obj, prop, desc) {
-                if (obj === window && (prop === 'open' || prop === 'location')) {
-                  return obj;
-                }
-                return _origDefineProperty.call(Object, obj, prop, desc);
-              };
-            } catch(e) {}
-            try {
-              document.write = function(){};
-              Document.prototype.write = function(){};
-            } catch(e) {}
           })();
           true;
         `}
@@ -473,22 +498,6 @@ function App(): React.JSX.Element {
             window.alert = function(){};
             window.confirm = function(){ return false; };
             window.prompt = function(){ return null; };
-            window.open = function(){ return null; };
-            try {
-              Object.defineProperty(window, 'top', {
-                get: function(){ return window.self; },
-                configurable: true
-              });
-              Object.defineProperty(window, 'parent', {
-                get: function(){ return window.self; },
-                configurable: true
-              });
-            } catch(e) {}
-            document.addEventListener('submit', function(e) {
-              e.preventDefault();
-              e.stopPropagation();
-              e.stopImmediatePropagation();
-            }, true);
             var muteAll = function() {
               var v = document.getElementsByTagName('video');
               for(var i=0; i<v.length; i++) { v[i].muted = true; v[i].volume = 0; }
@@ -499,9 +508,7 @@ function App(): React.JSX.Element {
             setInterval(muteAll, 1000);
             document.addEventListener('click', function(e) {
               var target = e.target;
-              while (target && target.tagName !== 'A') {
-                target = target.parentNode;
-              }
+              while (target && target.tagName !== 'A') target = target.parentNode;
               if (target) {
                 var href = (target.href || '').toLowerCase();
                 if (target.hasAttribute('download') || href.includes('.apk') || href.startsWith('blob:')) {
@@ -510,36 +517,6 @@ function App(): React.JSX.Element {
                   e.stopImmediatePropagation();
                 }
               }
-            }, true);
-            try {
-              var _observer = new MutationObserver(function(mutations) {
-                for (var m = 0; m < mutations.length; m++) {
-                  var nodes = mutations[m].addedNodes;
-                  for (var n = 0; n < nodes.length; n++) {
-                    var node = nodes[n];
-                    if (node.nodeType !== 1) continue;
-                    if (node.tagName === 'IFRAME' || node.tagName === 'FRAME') {
-                      try { node.remove(); } catch(_) {}
-                      continue;
-                    }
-                    if (node.tagName === 'OBJECT' || node.tagName === 'EMBED') {
-                      try { node.remove(); } catch(_) {}
-                      continue;
-                    }
-                    if (node.tagName === 'A') {
-                      var h = (node.href || '').toLowerCase();
-                      if (node.hasAttribute('download') || h.includes('.apk')) {
-                        try { node.remove(); } catch(_) {}
-                      }
-                    }
-                  }
-                }
-              });
-              _observer.observe(document.documentElement, { childList: true, subtree: true });
-            } catch(e) {}
-            window.addEventListener('beforeunload', function(e) {
-              e.stopPropagation();
-              e.stopImmediatePropagation();
             }, true);
           })();
           true;
@@ -555,7 +532,7 @@ function App(): React.JSX.Element {
         setSupportMultipleWindows={false}
         sharedCookiesEnabled={false}
         thirdPartyCookiesEnabled={true}
-        cacheEnabled={true}
+        cacheEnabled={false}
         androidLayerType="hardware"
       />
     );
@@ -647,42 +624,39 @@ function App(): React.JSX.Element {
           ads.length === 0 && { display: 'none' },
           isInPiP && styles.pipAdsWrapper
         ]}>
-          {isInPiP ? (
-            <View style={styles.pipAdsRow}>
-              {ads.slice(0, 3).map((ad, index) => (
-                <View key={`pip-ad-${index}`} style={styles.pipAdSlot}>
-                  {renderAdWebView(ad)}
-                </View>
-              ))}
-            </View>
-          ) : (
-            <ScrollView
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              contentContainerStyle={styles.scrollContent}
-              bounces={false}
-              overScrollMode="never"
-            >
-              {[0, 1, 2].map((index) => {
-                const ad = ads[index] || null;
+          <ScrollView
+            horizontal={!isInPiP}
+            scrollEnabled={!isInPiP}
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={isInPiP ? styles.pipAdsRow : styles.scrollContent}
+            bounces={false}
+            overScrollMode="never"
+          >
+            {[0, 1, 2].map((index) => {
+              const ad = ads[index] || null;
 
-                return (
-                <View key={`ad-slot-${index}`} style={[
+              return (
+              <View
+                key={ad ? `${ad.linkId}:${ad.url}:${adRefreshEpoch}` : `empty-ad-slot-${index}`}
+                style={[
                   styles.floatingAdContainer, 
-                  !ad && { display: 'none' }
-                ]}>
+                  !ad && { display: 'none' },
+                  isInPiP && styles.pipAdSlot
+                ]}
+              >
+                {!isInPiP && (
                   <View style={styles.adHeader}>
                     <Text style={styles.adTitle}>Ad is active</Text>
                     <TouchableOpacity onPress={() => ad && closeAdManually(ad.linkId)} style={styles.closeBtn}>
                       <Text style={styles.closeBtnText}>X</Text>
                     </TouchableOpacity>
                   </View>
-                  {renderAdWebView(ad)}
-                </View>
-                );
-              })}
-            </ScrollView>
-          )}
+                )}
+                {renderAdWebView(ad)}
+              </View>
+              );
+            })}
+          </ScrollView>
         </View>
       </View>
 
@@ -758,6 +732,11 @@ const styles = StyleSheet.create({
     width: '100%',
     backgroundColor: '#000',
     padding: 2,
+    paddingVertical: 2,
+    paddingBottom: 2,
+    bottom: undefined,
+    left: undefined,
+    right: undefined,
     zIndex: 20,
   },
   pipAdsRow: {

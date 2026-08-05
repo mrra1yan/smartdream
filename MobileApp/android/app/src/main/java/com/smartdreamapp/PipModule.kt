@@ -24,11 +24,27 @@ class PipModule(reactContext: ReactApplicationContext) : ReactContextBaseJavaMod
     @ReactMethod
     fun setPiPEnabled(enabled: Boolean) {
         isPiPEnabled = enabled
+        val activity = reactApplicationContext.currentActivity ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            activity.runOnUiThread {
+                try {
+                    val builder = PictureInPictureParams.Builder()
+                    val aspectRatio = Rational(4, 3)
+                    builder.setAspectRatio(aspectRatio)
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                        builder.setAutoEnterEnabled(enabled)
+                    }
+                    activity.setPictureInPictureParams(builder.build())
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            }
+        }
     }
 
     @ReactMethod
     fun enterPiP() {
-        val activity = currentActivity ?: return
+        val activity = reactApplicationContext.currentActivity ?: return
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             activity.runOnUiThread {
                 try {

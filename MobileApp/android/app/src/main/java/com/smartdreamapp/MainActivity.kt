@@ -6,6 +6,9 @@ import android.os.Build
 import android.os.Bundle
 import android.util.Rational
 import android.view.WindowManager
+import android.view.View
+import android.view.ViewGroup
+import android.webkit.WebView
 import com.facebook.react.ReactActivity
 import com.facebook.react.ReactActivityDelegate
 import com.facebook.react.ReactApplication
@@ -40,8 +43,48 @@ class MainActivity : ReactActivity() {
     }
   }
 
+  private fun resumeAllWebViews(view: View) {
+    if (view is WebView) {
+      try {
+        view.onResume()
+        view.resumeTimers()
+      } catch (e: Exception) {
+        e.printStackTrace()
+      }
+    } else if (view is ViewGroup) {
+      for (i in 0 until view.childCount) {
+        resumeAllWebViews(view.getChildAt(i))
+      }
+    }
+  }
+
   override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
+
+    if (isInPictureInPictureMode) {
+      val handler = android.os.Handler(android.os.Looper.getMainLooper())
+      try {
+        resumeAllWebViews(window.decorView)
+        handler.postDelayed({
+          if (!isFinishing && !isDestroyed && isInPictureInPictureMode) {
+            resumeAllWebViews(window.decorView)
+          }
+        }, 500)
+        handler.postDelayed({
+          if (!isFinishing && !isDestroyed && isInPictureInPictureMode) {
+            resumeAllWebViews(window.decorView)
+          }
+        }, 1500)
+        handler.postDelayed({
+          if (!isFinishing && !isDestroyed && isInPictureInPictureMode) {
+            resumeAllWebViews(window.decorView)
+          }
+        }, 3000)
+      } catch (e: Exception) {
+        e.printStackTrace()
+      }
+    }
+
     val reactApplication = application as? ReactApplication
     val reactContext = reactApplication?.reactHost?.currentReactContext
     if (reactContext != null) {

@@ -110,7 +110,7 @@ export function AdContainer() {
         <>
           {active.map((ad, i) => (
             <AdModal
-              key={ad.linkId}
+              key={`${ad.linkId}:${ad.url}`}
               linkId={ad.linkId}
               url={ad.url}
               startedAt={ad.startedAt}
@@ -125,7 +125,7 @@ export function AdContainer() {
           <div className={`relative z-10 grid w-full max-w-[220px] sm:max-w-[260px] gap-2 pointer-events-auto ${active.length > 1 ? 'grid-cols-2' : 'grid-cols-1'}`}>
             {active.map((ad, i) => (
               <AdModal
-                key={ad.linkId}
+                key={`${ad.linkId}:${ad.url}`}
                 linkId={ad.linkId}
                 url={ad.url}
                 startedAt={ad.startedAt}
@@ -236,11 +236,12 @@ function AdModal({
           JSON.stringify({
             type: "CLOSE_AD",
             linkId: linkId,
+            url: url,
           })
         );
       }
     };
-  }, [linkId]);
+  }, [linkId, url]);
 
   // Listen for messages from React Native app
   useEffect(() => {

@@ -41,7 +41,8 @@ export async function getFeed(
   offset = 0,
   limit = 50,
 ): Promise<{ links: FeedLinkRow[]; nextOffset: number }> {
-  const cacheKey = `feed:${viewerId}:${offset}`;
+  const normalizedLimit = Math.max(1, Math.min(Math.floor(limit), 100));
+  const cacheKey = `feed:${viewerId}:${offset}:${normalizedLimit}`;
   const cached = await cacheGet<{ links: FeedLinkRow[]; nextOffset: number }>(cacheKey);
   if (cached) return cached;
 
@@ -56,7 +57,7 @@ export async function getFeed(
       activeLikeCount: settings.activeLikeCount,
       activeWindowHours: settings.activeWindowHours,
       cooldownHours: LINK_COOLDOWN_HOURS,
-      limit,
+      limit: normalizedLimit,
       offset,
     });
 

@@ -1,7 +1,7 @@
 "use client";
 
 import { create } from "zustand";
-import { TOTAL_AD_SECONDS } from "@/lib/types";
+import { MAX_CONCURRENT_ADS, TOTAL_AD_SECONDS } from "@/lib/types";
 import { commitLikeAction, startAdView } from "@/app/actions/like";
 
 export type ActiveAd = {
@@ -9,8 +9,10 @@ export type ActiveAd = {
   url: string;
   startedAt: number;
   source?: "boosted";
+  starting?: boolean;
+  startRequestId?: string;
   /** Ad-view JWT token returned by startAdView — only set after the server
-   *  confirms the ad-view start. Until then the timer MUST NOT fire. */
+   * confirms the ad-view start. Until then the timer MUST NOT fire. */
   token?: string;
 };
 
@@ -82,17 +84,6 @@ function clearTimer(linkId: string) {
   }
 }
 
-function schedule(linkId: string, run: () => void) {
-  clearTimer(linkId);
-  timers.set(
-    linkId,
-    setTimeout(() => {
-      timers.delete(linkId);
-      run();
-    }, TOTAL_AD_SECONDS * 1000),
-  );
-}
-
 // ── Commit helpers ──────────────────────────────────────────────────────
 
 /** Returns true if the commit succeeded, false if it's a permanent rejection
@@ -117,9 +108,8 @@ async function commitLike(
 
 /** Commits the like (with retries on network errors), updates store, and
  *  dispatches the appropriate stats event.
- *  stats_updated fires *before* the server call so the UI updates at the
- *  exact 7-second mark — the server response is handled as a background
- *  correction via stats_sync only on failure. */
+ *  stats_updated fires only after the server confirms the database commit;
+ *  failed commits trigger stats_sync so the UI can reconcile. */
 async function commitAndFinalise(
   linkId: string,
   token: string,
@@ -173,16 +163,17 @@ export const useAdStore = create<AdStore>((set, get) => {
     active: [],
     queue: [],
     committed: {},
-    maxSlots: 4,
+    maxSlots: MAX_CONCURRENT_ADS,
     adBlockerDetected: false,
     setAdBlockerDetected: (val) => set({ adBlockerDetected: val }),
 
-    enqueue: (linkId, url, userMaxSlots = 4, isBoosted) => {
+    enqueue: (linkId, url, userMaxSlots = MAX_CONCURRENT_ADS, isBoosted) => {
       const { active, queue } = get();
-      set({ maxSlots: userMaxSlots });
+      const maxSlots = Math.min(userMaxSlots, MAX_CONCURRENT_ADS);
+      set({ maxSlots });
       if (active.some((a) => a.linkId === linkId)) return;
       if (queue.some((a) => a.linkId === linkId)) return;
-      if (active.length >= userMaxSlots) {
+      if (active.length >= maxSlots) {
         set({
           queue: [
             ...queue,
@@ -219,54 +210,38 @@ export const useAdStore = create<AdStore>((set, get) => {
     markLoaded: (linkId) => {
       const { active } = get();
       const ad = active.find((a) => a.linkId === linkId);
-      if (!ad || ad.startedAt !== 0) return;
+      if (!ad || ad.startedAt !== 0 || ad.starting) return;
 
-      // ── Start the countdown IMMEDIATELY for UX ──────────────────────
-      const loadStartMs = Date.now();
+      const startRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       set((s) => ({
         active: s.active.map((a) =>
-          a.linkId === linkId
-            ? { ...a, startedAt: loadStartMs }
-            : a,
+          a.linkId === linkId ? { ...a, starting: true, startRequestId } : a,
         ),
       }));
 
-      // ── Fetch token in background ──────────────────────────────────
       (async () => {
         try {
           const result = await startAdView(linkId, ad.source);
           const current = get().active.find((a) => a.linkId === linkId);
-          if (!current) return; // dismissed while waiting
+          if (!current || current.startRequestId !== startRequestId) return;
 
-        if (!("token" in result)) {
-          clearTimer(linkId);
-          set((s) => ({
-            active: s.active.filter((a) => a.linkId !== linkId),
-          }));
-          get().startNext();
-          return;
-        }
-
-        set((s) => ({
-          active: s.active.map((a) =>
-            a.linkId === linkId
-              ? { ...a, token: result.token }
-              : a,
-          ),
-        }));
-
-        // How much of the TOTAL_AD_SECONDS window has already elapsed?
-        // If the server call took longer than the ad-view duration,
-        // commit immediately — otherwise schedule for the remainder.
-        const elapsed = Date.now() - loadStartMs;
-        const remaining = TOTAL_AD_SECONDS * 1000 - elapsed;
-
-        if (remaining <= 0) {
-          if (!finalisingIds.has(linkId)) {
-            finalisingIds.add(linkId);
-            void commitAndFinalise(linkId, result.token, ad.source);
+          if (!("token" in result)) {
+            set((s) => ({
+              active: s.active.filter((a) => a.linkId !== linkId),
+            }));
+            get().startNext();
+            return;
           }
-        } else {
+
+          const viewStartMs = Date.now();
+          set((s) => ({
+            active: s.active.map((a) =>
+              a.linkId === linkId
+                ? { ...a, startedAt: viewStartMs, starting: false, startRequestId: undefined, token: result.token }
+                : a,
+            ),
+          }));
+
           clearTimer(linkId);
           timers.set(
             linkId,
@@ -276,13 +251,11 @@ export const useAdStore = create<AdStore>((set, get) => {
                 finalisingIds.add(linkId);
                 void commitAndFinalise(linkId, result.token, ad.source);
               }
-            }, remaining),
+            }, TOTAL_AD_SECONDS * 1000),
           );
-        }
         } catch (err) {
-          // ── startAdView failed (network error, server down, etc.) ──
-          // Don't leave this ad slot permanently blocked — dismiss it
-          // so the next queued ad can start.
+          const current = get().active.find((a) => a.linkId === linkId);
+          if (!current || current.startRequestId !== startRequestId) return;
           console.error('[markLoaded] startAdView failed for linkId:', linkId, err);
           clearTimer(linkId);
           set((s) => ({

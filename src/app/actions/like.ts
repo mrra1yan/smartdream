@@ -11,8 +11,8 @@ import { processLikeCommit } from "@/lib/repos/rpc";
 import { publishLinksUpdate, publishStatsUpdate } from "@/lib/realtime-publish";
 
 // Legitimate ceiling: the client runs at most MAX_CONCURRENT_ADS (3) ad slots
-// at once, each cycling roughly every TOTAL_AD_SECONDS (9s) plus network/UI
-// overhead — around 18-20 completed ad-view cycles/minute at full throttle.
+// at once, each cycling roughly every TOTAL_AD_SECONDS (14s) plus network/UI
+// overhead.
 const AD_VIEW_RATE_LIMIT = { maxAttempts: 60, windowMs: 60_000, perUserOnly: true } as const;
 
 export async function startAdView(
@@ -71,21 +71,22 @@ export async function commitLikeAction(
     return { ok: false, error: "invalid ad-view token" };
   }
 
-  // Single-use: reject a replay of this exact token immediately.
-  if (!consumeAdViewToken(claims.jti)) {
-    console.warn("[commitLikeAction] Ad-view token already used:", claims.jti);
-    return { ok: false, error: "ad-view token already used" };
-  }
-
   // ── Server-side elapsed-time enforcement ──────────────────────────────
   const elapsed = Date.now() - claims.startedAtMs;
-  const minRequiredMs = TOTAL_AD_SECONDS * 1000 - 1000; // 8 s minimum (9 s total, 1 s grace)
+  const minRequiredMs = TOTAL_AD_SECONDS * 1000 - 1000; // 13 s minimum (14 s total, 1 s grace)
   if (elapsed < minRequiredMs) {
     console.warn(
       "[commitLikeAction] Commit too early:",
       Math.round(elapsed / 1000), "s elapsed, need ≥", Math.round(minRequiredMs / 1000), "s",
     );
     return { ok: false, error: "too_early" };
+  }
+
+  // Single-use: consume only after the view duration is valid so an early
+  // request can retry with the same server-issued token.
+  if (!consumeAdViewToken(claims.jti)) {
+    console.warn("[commitLikeAction] Ad-view token already used:", claims.jti);
+    return { ok: false, error: "ad-view token already used" };
   }
 
   // Parallel: link+owner in one join, settings via Redis-cached helper.
