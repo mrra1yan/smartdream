@@ -1,40 +1,24 @@
 import "server-only";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { cookies } from "next/headers";
+import {
+  getSessionFromCookie,
+  type SessionClaims,
+} from "@/lib/session-cookie";
 
 /**
- * Thin session shim over Supabase Auth.
- *
- * The previous hand-rolled auth kept a jose-signed JWT in the `session`
- * cookie and exposed `{ sub, role, status }` from it. Auth now lives in
- * Supabase (`@supabase/ssr`), but several server modules (`autolike.ts`,
- * `stats.ts`) still call `getSession()` to resolve the current user id.
- *
- * This shim preserves that API by reading the Supabase session + the mirrored
- * `profiles` row. It performs one DB lookup, so prefer `getCurrentUser()` in
- * `auth.ts` (React-cached) when you need the full profile.
+ * Resolves the current session from the `sd_session` cookie.
+ * Pure JWT decode/verify — no DB round-trip (the old Supabase shim made a
+ * `getUser()` network call per call-site; several modules call getSession()
+ * on every page load).
  */
 
-export type SessionPayload = {
-  sub: string; // userId (== auth.users.id)
-  role: "user" | "admin" | "super_admin";
-  status: "pending" | "approved" | "rejected";
-};
+export type SessionPayload = SessionClaims;
 
-/** Returns the active session payload, or null when there is no signed-in user. */
+/** Returns the active session payload, or null when there is no signed-in
+ *  user. Role/status claims may be up to ~60s stale after an admin changes
+ *  them — getCurrentUser() (src/lib/auth.ts) re-reads the DB row behind a
+ *  60s Redis cache and is the real authorization boundary. */
 export async function getSession(): Promise<SessionPayload | null> {
-  const supabase = await createSupabaseServerClient();
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) return null;
-
-  // role / status are mirrored into the user's metadata by the DB trigger
-  // (see supabase/migrations/0001_supabase_auth.sql). Fall back to a DB read
-  // if they are not present yet (e.g. users created before the trigger ran).
-  const role = (user.user_metadata?.role as SessionPayload["role"]) ?? "user";
-  const status =
-    (user.user_metadata?.status as SessionPayload["status"]) ?? "pending";
-
-  return { sub: user.id, role, status };
+  const store = await cookies();
+  return getSessionFromCookie(store.getAll());
 }

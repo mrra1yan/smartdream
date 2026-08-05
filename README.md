@@ -38,8 +38,9 @@ A full-stack **ad-view give-and-take platform** built with Next.js 15. Users sha
 | **Framework**    | [Next.js 15](https://nextjs.org) (App Router, Server Components) |
 | **Language**     | TypeScript 5                                                      |
 | **Styling**      | Tailwind CSS 4                                                    |
-| **Database**     | SQLite (local via `better-sqlite3`) / Cloudflare D1 (production)  |
-| **ORM**          | [Drizzle ORM](https://orm.drizzle.team)                           |
+| **Database**     | MySQL 8 (self-hosted, docker-compose)                            |
+| **Data access**  | `mysql2` + thin repository layer (`src/lib/repos/*`)             |
+| **Cache/Realtime**| Redis 7 (object cache, rate limiting, pub/sub → SSE)            |
 | **Auth**         | Custom JWT sessions ([jose](https://github.com/panva/jose))       |
 | **Passwords**    | bcryptjs                                                          |
 | **Animations**   | Framer Motion                                                     |
@@ -49,7 +50,7 @@ A full-stack **ad-view give-and-take platform** built with Next.js 15. Users sha
 | **Theming**      | next-themes (light / dark / system)                               |
 | **Validation**   | Zod 4                                                             |
 | **Fonts**        | Geist Sans & Geist Mono (via `next/font/google`)                  |
-| **Edge Deploy**  | Cloudflare Pages (`@opennextjs/cloudflare`)                    |
+| **Deploy**       | VPS (Node) + docker-compose (MySQL 8 + Redis 7)                |
 
 ---
 
@@ -265,14 +266,18 @@ cd "Smart Dream"
 # 2. Install dependencies
 npm install
 
-# 3. Set up environment variables
+# 3. Start MySQL 8 + Redis 7 (Docker)
+npm run db:up
+
+# 4. Set up environment variables
 cp .env.example .env.local
-# Edit .env.local and set your JWT_SECRET
+# Edit .env.local and set your JWT_SECRET (and MySQL/Redis credentials if you
+# changed them from the docker-compose defaults)
 
-# 4. Generate and apply database migrations
-npx drizzle-kit push
+# 5. Apply database migrations (schema + stored procedures + events)
+npm run db:migrate
 
-# 5. Start the development server
+# 6. Start the development server
 npm run dev
 ```
 
@@ -286,9 +291,11 @@ The app will be available at [http://localhost:3000](http://localhost:3000).
 | `npm run build`   | Create production build                  |
 | `npm run start`   | Start production server                  |
 | `npm run lint`    | Run ESLint                               |
-| `npx drizzle-kit push`     | Push schema changes to SQLite   |
-| `npx drizzle-kit generate` | Generate SQL migration files    |
-| `npx drizzle-kit studio`   | Open Drizzle Studio (DB GUI)    |
+| `npm run db:up`   | Start MySQL + Redis containers           |
+| `npm run db:migrate` | Apply pending migrations (`db/migrations/*.sql`) |
+| `npm run db:status`  | List applied/pending migrations      |
+| `npm run db:test`    | Run the like-concurrency/quota test |
+| `npm run db:seed`    | One-time data migration from the old Supabase |
 
 ---
 
@@ -299,23 +306,25 @@ Create a `.env.local` file in the project root. See `.env.example` for the templ
 | Variable                | Required | Description                                                 |
 | ----------------------- | -------- | ----------------------------------------------------------- |
 | `JWT_SECRET`            | **Yes** (prod) | Secret key for signing JWT session cookies. In dev, defaults to `dev-secret-change-me`. |
-| `SUPER_ADMIN_EMAIL`     | No       | Email for initial super admin account seed.                 |
-| `SUPER_ADMIN_PASSWORD`  | No       | Password for initial super admin account seed.              |
+| `MYSQL_HOST` / `MYSQL_PORT` / `MYSQL_DATABASE` / `MYSQL_USER` / `MYSQL_PASSWORD` | Yes | MySQL connection (docker-compose defaults in `.env.example`). |
+| `REDIS_URL`             | Yes      | Redis connection string (e.g. `redis://127.0.0.1:6379`).     |
+| `SESSION_COOKIE_NAME`   | No       | Session cookie name (default `sd_session`).                 |
 
-> **Production (Cloudflare):** Set `JWT_SECRET` as a Cloudflare environment variable. The D1 database binding is injected automatically via `wrangler.toml`.
+> **Production (VPS):** Set `JWT_SECRET` and the MySQL/Redis credentials as environment variables on the Node process. `npm run build && npm run start` (or a process manager like PM2/systemd).
 
 ---
 
 ## Database
 
-### Dual-Runtime Support
+### MySQL 8 (docker-compose)
 
-The database layer (`src/lib/db/index.ts`) seamlessly switches between:
+The data layer lives in `src/lib/db.ts` (connection pool) and `src/lib/repos/*` (thin repositories mapping rows 1:1 onto the old Supabase row shapes). The schema + stored procedures + scheduled events are plain numbered `.sql` files in `db/migrations/`, applied by `scripts/migrate.mjs` (tracked in `schema_migrations`).
 
-- **Local development:** `better-sqlite3` reading from `data/local.db` with WAL mode and foreign keys enabled.
-- **Production (Cloudflare):** Cloudflare D1 binding detected at runtime. The `DB` binding is injected via `wrangler.toml`.
+- **Stored procedures** (`db/migrations/0002_rpcs.sql`) port the old Postgres RPCs: `process_like_commit` (named locks + atomic quota ceilings), `get_eligible_feed_links` (joins the `feed_eligibility_cache` table), `get_my_stats`, `add_links_atomic`, `next_boost_order`, `get_top_likers`, `refresh_feed_eligibility_cache` (EVENT every 120s).
+- **Realtime** is Redis pub/sub → SSE (`/api/realtime`, Node runtime).
+- **Backups:** `mysqldump` on a cron (e.g. `mysqldump smartdream | gzip > /backups/sd-$(date +%F).sql.gz`). Redis is optional to back up (cache only).
 
-### Schema (5 Tables)
+### Schema
 
 #### `profiles`
 The core user table. Stores credentials, role, approval status, premium feature state, and referral tracking.
@@ -740,25 +749,32 @@ Excludes static files, images, and Next.js internal routes.
 
 ### Local Development
 ```bash
+npm run db:up        # MySQL 8 + Redis 7 containers
+npm run db:migrate   # schema + stored procedures + events
 npm run dev
 ```
-Uses `better-sqlite3` with a local `data/local.db` file. The database is auto-created on first run.
 
-### Cloudflare Pages (Production)
+### VPS (Production, Docker)
 ```bash
-# Build with Cloudflare adapter
-npx opennextjs-cloudflare build
+# 1. Ship the code and install deps
+npm install
+npm run build
 
-# Deploy
-npx wrangler pages deploy
+# 2. Start MySQL + Redis (docker-compose.yml) and set env vars
+#    (JWT_SECRET, MYSQL_*, REDIS_URL — see .env.example)
+npm run db:up
+npm run db:migrate
+
+# 3. Run the Node server behind nginx/pm2/systemd
+npm run start
 ```
 
-**Cloudflare Configuration (`wrangler.toml`):**
-- **D1 Database:** Bound as `DB` (matches the code in `src/lib/db/index.ts`).
-- **Environment Variables:** Set `JWT_SECRET` as a Cloudflare secret.
-- **Build Command:** `npx opennextjs-cloudflare build`
+**nginx notes:**
+- The SSE endpoint (`/api/realtime`) must not be buffered:
+  `location /api/realtime { proxy_buffering off; proxy_read_timeout 3600s; proxy_http_version 1.1; proxy_set_header Connection ""; }`
+- Set `client_max_body_size` to match `next.config.ts`'s 10 MB server-actions limit.
 
-> **Important:** Replace `YOUR_D1_DATABASE_ID_HERE` in `wrangler.toml` with your actual D1 database ID before deploying.
+**Backups:** daily `mysqldump smartdream | gzip` (schema + data). Redis is a cache — no backup needed.
 
 ---
 

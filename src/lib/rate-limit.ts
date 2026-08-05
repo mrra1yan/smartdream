@@ -1,28 +1,28 @@
 import { headers } from "next/headers";
+import { redis } from "@/lib/redis";
 
+/**
+ * Distributed rate limiter backed by Redis (INCR + EXPIRE) — fixes the old
+ * per-isolate in-memory Map, which let concurrent requests on different
+ * server instances/isolates each get their own bucket (the effective limit
+ * was MAX_ATTEMPTS × instance count).
+ *
+ * If Redis is unreachable we degrade to the previous in-memory Map behavior
+ * (still correct per instance, just not shared) rather than failing the
+ * request.
+ */
+
+const MAX_ATTEMPTS = 5;
+const WINDOW_MS = 5 * 60 * 1000; // 5 minutes
+
+// --- In-memory fallback (Redis down) ----------------------------------------
 type RateLimitEntry = {
   count: number;
   resetAt: number;
 };
 
-// In-memory store (Note: Resets on server restart, not shared across distributed edge nodes)
-// TODO(rate-limit infra): this Map is per-isolate. On Cloudflare Workers,
-// concurrent requests can land on different isolates/edge nodes, each with
-// its own independent Map, so the real effective limit is
-// MAX_ATTEMPTS * (number of isolates handling this key), not MAX_ATTEMPTS.
-// Fixing the IP-spoofing hole above closes the "attacker picks their own
-// key" bypass, but a fully robust distributed limiter still needs a shared
-// backing store (e.g. a KV namespace or Durable Object) so all isolates see
-// the same counter. That's a larger infra change and out of scope here.
 const store = new Map<string, RateLimitEntry>();
-
-const MAX_ATTEMPTS = 5;
-const WINDOW_MS = 5 * 60 * 1000; // 5 minutes
-
-// Expired entries are only ever overwritten when the same key is checked
-// again, so keys that are hit once and never again would otherwise sit in
-// the Map forever. Sweep them out periodically to bound memory growth.
-const SWEEP_INTERVAL_MS = 10 * 60 * 1000; // 10 minutes
+const SWEEP_INTERVAL_MS = 10 * 60 * 1000;
 let lastSweep = Date.now();
 
 function sweepExpired(now: number) {
@@ -42,19 +42,21 @@ export type RateLimitOptions = {
    * When true, key on `identifier` alone (no IP component). Use this for
    * authenticated, per-user throttles (e.g. like/ad-view/feed actions) where
    * the caller is always a known `user.id` — mixing in IP would let a user
-   * dodge the limit simply by switching networks, and would also let two
-   * different authenticated users behind the same NAT/CGNAT/shared
-   * mobile-carrier IP throttle each other.
+   * dodge the limit simply by switching networks.
    */
   perUserOnly?: boolean;
 };
 
+function buildKey(action: string, identifier: string | undefined, perUserOnly: boolean | undefined): string {
+  if (perUserOnly) {
+    return `${action}:user:${identifier ?? "no-id"}`;
+  }
+  return `${action}:${identifier ?? "no-id"}`;
+}
+
 /**
  * Checks if the current request/action is rate-limited.
  * Returns true if allowed, false if rate-limited.
- *
- * Default behavior (no `options`) is unchanged from the original IP+identifier
- * keyed, 5-attempts-per-5-minutes guard used by login/signup.
  */
 export async function checkRateLimit(
   action: string,
@@ -66,44 +68,47 @@ export async function checkRateLimit(
 
   let key: string;
   if (options?.perUserOnly) {
-    key = `${action}:user:${identifier ?? "no-id"}`;
+    key = buildKey(action, identifier, true);
   } else {
     const headersList = await headers();
-    // `x-forwarded-for` is client-spoofable (any caller can set an arbitrary
-    // value), which makes an IP-keyed rate limit trivially bypassable — send a
-    // different bogus `x-forwarded-for` value on every request and each one
-    // gets its own bucket. `cf-connecting-ip` is set by Cloudflare itself at
-    // the edge (see src/app/api/embed-frame/route.ts, which already trusts it
-    // for the same reason) and can't be overridden by the client, so prefer it
-    // and only fall back to `x-forwarded-for`'s first entry when Cloudflare's
-    // header is absent (e.g. local dev without the CF proxy in front).
+    // `x-forwarded-for` is client-spoofable; `cf-connecting-ip` is set by
+    // Cloudflare itself and can't be overridden by the client — prefer it,
+    // fall back to x-forwarded-for's first entry only when absent (local dev).
     const cfConnectingIp = headersList.get("cf-connecting-ip");
     const forwardedFor = headersList.get("x-forwarded-for");
     const ip = cfConnectingIp?.trim() || (forwardedFor ? forwardedFor.split(",")[0].trim() : "unknown-ip");
-    key = `${action}:${ip}:${identifier ?? "no-id"}`;
+    key = buildKey(action, `${ip}:${identifier ?? "no-id"}`, false);
   }
 
-  const now = Date.now();
+  const redisKey = `rl:${key}`;
+  try {
+    const count = await redis.incr(redisKey);
+    if (count === 1) {
+      await redis.expire(redisKey, Math.ceil(windowMs / 1000));
+    }
+    return count <= maxAttempts;
+  } catch (err) {
+    console.error("[rate-limit] Redis unavailable, falling back to in-memory:", (err as Error).message);
+    return memoryCheck(key, maxAttempts, windowMs);
+  }
+}
 
+function memoryCheck(key: string, maxAttempts: number, windowMs: number): boolean {
+  const now = Date.now();
   sweepExpired(now);
 
   const entry = store.get(key);
-
   if (!entry) {
     store.set(key, { count: 1, resetAt: now + windowMs });
     return true;
   }
-
   if (now > entry.resetAt) {
     store.set(key, { count: 1, resetAt: now + windowMs });
     return true;
   }
-
   if (entry.count >= maxAttempts) {
     return false;
   }
-
   entry.count += 1;
-  store.set(key, entry);
   return true;
 }

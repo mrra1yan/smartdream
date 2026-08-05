@@ -1,0 +1,57 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: smartdream-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root_dev_password}
+      MYSQL_DATABASE: ${MYSQL_DATABASE:-smartdream}
+      MYSQL_USER: ${MYSQL_USER:-smartdream}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-smartdream_dev_password}
+      TZ: UTC
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_0900_ai_ci
+      - --event-scheduler=ON
+      - --default-time-zone=+00:00
+      - --max-connections=200
+      # InnoDB buffer pool: the biggest lever for the COUNT-heavy feed/stats
+      # queries. Default is 128MB — use up to ~70% of available RAM.
+      - --innodb-buffer-pool-size=${MYSQL_BUFFER_POOL_MB:-2048}M
+      # Keep the likes COUNTs (cooldown/deficit) index-friendly in memory.
+      - --innodb-buffer-pool-instances=4
+      - --innodb-flush-log-at-trx-commit=2
+      # Slow query log → TABLE (queryable: SELECT * FROM mysql.slow_log).
+      # long_query_time in seconds; 0.5s catches any hot-path offender.
+      - --slow-query-log=ON
+      - --long-query-time=0.5
+      - --log-output=TABLE
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "root", "-p${MYSQL_ROOT_PASSWORD:-root_dev_password}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  redis:
+    image: redis:7-alpine
+    container_name: smartdream-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  mysql_data:
+  redis_data:

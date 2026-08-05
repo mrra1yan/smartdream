@@ -1,12 +1,14 @@
 "use server";
 
-import { supabase } from "@/lib/supabase";
 import { getCurrentUser } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
 import { issueAdViewToken, verifyAdViewToken, consumeAdViewToken } from "@/lib/ad-view-token";
 import { checkRateLimit } from "@/lib/rate-limit";
 import { bangladeshMidnightISO } from "@/lib/timezone";
 import { TOTAL_AD_SECONDS } from "@/lib/types";
+import { getLinkOwner } from "@/lib/repos/links";
+import { processLikeCommit } from "@/lib/repos/rpc";
+import { publishLinksUpdate, publishStatsUpdate } from "@/lib/realtime-publish";
 
 // Legitimate ceiling: the client runs at most MAX_CONCURRENT_ADS (3) ad slots
 // at once, each cycling roughly every TOTAL_AD_SECONDS (9s) plus network/UI
@@ -24,13 +26,8 @@ export async function startAdView(
   const allowed = await checkRateLimit("ad_view_start", user.id, AD_VIEW_RATE_LIMIT);
   if (!allowed) return { error: "rate_limited" };
 
-  const { data, error } = await supabase
-    .from("links")
-    .select("user_id")
-    .eq("id", linkId)
-    .single();
-
-  if (error || !data || (data as any).user_id === user.id) {
+  const link = await getLinkOwner(linkId);
+  if (!link || link.user_id === user.id) {
     return { error: "invalid link" };
   }
 
@@ -74,18 +71,13 @@ export async function commitLikeAction(
     return { ok: false, error: "invalid ad-view token" };
   }
 
-  // Single-use: reject a replay of this exact token immediately, before
-  // spending any DB round-trips on it.
+  // Single-use: reject a replay of this exact token immediately.
   if (!consumeAdViewToken(claims.jti)) {
     console.warn("[commitLikeAction] Ad-view token already used:", claims.jti);
     return { ok: false, error: "ad-view token already used" };
   }
 
   // ── Server-side elapsed-time enforcement ──────────────────────────────
-  // The token carries the server timestamp from startAdView(). Verify that
-  // the client actually waited the full ad-view duration before committing.
-  // A 1-second grace window tolerates minor clock skew and network latency,
-  // but rejects instant commits that bypass the client-side timer entirely.
   const elapsed = Date.now() - claims.startedAtMs;
   const minRequiredMs = TOTAL_AD_SECONDS * 1000 - 1000; // 8 s minimum (9 s total, 1 s grace)
   if (elapsed < minRequiredMs) {
@@ -96,65 +88,48 @@ export async function commitLikeAction(
     return { ok: false, error: "too_early" };
   }
 
-  // Parallel: link+owner in one join, settings via React-cached helper.
-  // Exposure/deficit/cooldown are enforced inside process_like_commit — the
-  // previous TS pre-checks duplicated those COUNTs over 122k+ likes (~4s).
-  const [linkResult, settings] = await Promise.all([
-    supabase
-      .from("links")
-      .select("user_id, profiles!inner(is_elite, is_boosted)")
-      .eq("id", linkId)
-      .single(),
-    getSettings(),
-  ]);
+  // Parallel: link+owner in one join, settings via Redis-cached helper.
+  const [link, settings] = await Promise.all([getLinkOwner(linkId), getSettings()]);
 
-  const { data: link, error: linkError } = linkResult;
-  if (linkError || !link) {
-    console.warn("[commitLikeAction] Link not found:", linkId, linkError?.message);
+  if (!link) {
+    console.warn("[commitLikeAction] Link not found:", linkId);
     return { ok: false, error: "link_not_found" };
   }
 
-  const linkData = link as any;
-  const receiver_id = linkData.user_id as string;
+  const receiver_id = link.user_id;
   if (receiver_id === user.id) {
     console.warn("[commitLikeAction] Self-like attempt:", linkId);
     return { ok: false, error: "self_like" };
   }
 
-  const owner = (Array.isArray(linkData.profiles) ? linkData.profiles[0] : linkData.profiles) as
-    | { is_elite?: boolean; is_boosted?: boolean }
-    | null;
-  if (!owner) {
-    console.warn("[commitLikeAction] Owner profile not found for receiver:", receiver_id);
-    return { ok: false, error: "owner_not_found" };
-  }
-
   const isAnon = user.isElite;
-  const isActuallyBoosted = source === "boosted" && !!owner.is_boosted && !owner.is_elite;
+  const isActuallyBoosted = source === "boosted" && !!link.is_boosted && !link.is_elite;
 
-  const { data: rpcResult, error: rpcError } = await supabase.rpc("process_like_commit", {
-    p_liker_id: user.id,
-    p_link_id: linkId,
-    p_receiver_id: receiver_id,
-    p_is_anon: isAnon,
-    p_is_boosted_like: isActuallyBoosted,
-    p_offer_active: settings.offerActive,
-    p_offer_likes_required: settings.offerLikesRequired,
-    p_offer_autolike_minutes: settings.offerAutoLikeMinutes,
-    p_active_window_hours: settings.activeWindowHours,
-    p_active_like_count: settings.activeLikeCount,
-    p_today_iso: bangladeshMidnightISO(),
+  const committed = await processLikeCommit({
+    likerId: user.id,
+    linkId,
+    receiverId: receiver_id,
+    isAnon,
+    isBoostedLike: isActuallyBoosted,
+    offerActive: settings.offerActive,
+    offerLikesRequired: settings.offerLikesRequired,
+    offerAutoLikeMinutes: settings.offerAutoLikeMinutes,
+    activeWindowHours: settings.activeWindowHours,
+    activeLikeCount: settings.activeLikeCount,
+    todayIso: bangladeshMidnightISO(),
   });
 
-  if (rpcError) {
-    console.error("[commitLikeAction] RPC error:", rpcError.message, rpcError.code);
-    return { ok: false, error: "rpc_error" };
-  }
-
-  if (!rpcResult) {
-    console.warn("[commitLikeAction] RPC returned false (cooldown or deficit) for link:", linkId);
+  if (!committed) {
+    console.warn("[commitLikeAction] RPC rejected (cooldown, deficit, or lock failure) for link:", linkId);
     return { ok: false, error: "cooldown_active" };
   }
+
+  // Fire realtime notifications (best-effort): the receiver's stats channel
+  // and the link owner's links channel (their likes_count just went up).
+  await Promise.all([
+    publishStatsUpdate(receiver_id),
+    publishLinksUpdate(receiver_id),
+  ]);
 
   console.log("[commitLikeAction] SUCCESS for link:", linkId);
   return { ok: true };

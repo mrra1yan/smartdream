@@ -2,8 +2,8 @@
 
 import { revalidatePath, revalidateTag } from "next/cache";
 import { z } from "zod";
-import { supabase } from "@/lib/supabase";
 import { requireStaff } from "@/lib/auth";
+import { deleteBlog as repoDeleteBlog, getBlogById, insertBlog, updateBlog } from "@/lib/repos/blogs";
 
 const BlogSchema = z.object({
   title: z.string().min(1).max(200),
@@ -36,56 +36,46 @@ export async function saveBlog(
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
   if (id) {
-    const { data: existing } = await supabase
-      .from("blogs")
-      .select("*")
-      .eq("id", id)
-      .single();
-
+    const existing = await getBlogById(id);
     if (!existing) return { error: "Not found" };
 
-    let pubAt = (existing as any).published_at;
+    let pubAt = existing.published_at;
     if (isPublished && !pubAt) pubAt = new Date().toISOString();
     else if (!isPublished) pubAt = null;
 
-    const { error } = await supabase
-      .from("blogs")
-      .update({
+    try {
+      await updateBlog(id, {
         title: parsed.data.title,
         slug: parsed.data.slug,
         excerpt: parsed.data.excerpt ?? null,
         content: parsed.data.content ?? null,
         hero_image: parsed.data.heroImage || null,
         published_at: pubAt,
-      })
-      .eq("id", id);
-
-    if (error) {
+      });
+    } catch (err) {
+      console.error("saveBlog update error:", err);
       return { error: "Failed to update blog" };
     }
   } else {
-    const { error } = await supabase.from("blogs").insert({
-      id: globalThis.crypto.randomUUID(),
-      title: parsed.data.title,
-      slug: parsed.data.slug,
-      excerpt: parsed.data.excerpt ?? null,
-      content: parsed.data.content ?? null,
-      hero_image: parsed.data.heroImage || null,
-      published_at: isPublished ? new Date().toISOString() : null,
-      created_by: staff.id,
-      created_at: new Date().toISOString(),
-    });
-
-    if (error) {
+    try {
+      await insertBlog({
+        id: globalThis.crypto.randomUUID(),
+        title: parsed.data.title,
+        slug: parsed.data.slug,
+        excerpt: parsed.data.excerpt ?? null,
+        content: parsed.data.content ?? null,
+        hero_image: parsed.data.heroImage || null,
+        published_at: isPublished ? new Date().toISOString() : null,
+        created_by: staff.id,
+      });
+    } catch (err) {
+      console.error("saveBlog insert error:", err);
       return { error: "Failed to create blog" };
     }
   }
 
-  // revalidatePath only clears Next.js's route-level render cache; the
-  // underlying getBlogs()/getBlogBySlug() data is cached separately via
-  // unstable_cache (see src/lib/blog.ts) and needs its own invalidation so
-  // a just-published/edited post doesn't wait out the 5-minute data-cache
-  // TTL on top of this.
+  // Invalidate the unstable_cache data cache (getBlogs/getBlogBySlug) so a
+  // just-published/edited post doesn't wait out the 5-minute TTL.
   revalidateTag("blogs");
   revalidatePath("/blog");
   revalidatePath("/admin/blog");
@@ -95,10 +85,10 @@ export async function saveBlog(
 
 export async function deleteBlog(id: string) {
   await requireStaff();
-  const { error } = await supabase.from("blogs").delete().eq("id", id);
-
-  if (error) {
-    console.error("deleteBlog error:", error);
+  try {
+    await repoDeleteBlog(id);
+  } catch (err) {
+    console.error("deleteBlog error:", err);
   }
 
   revalidateTag("blogs");

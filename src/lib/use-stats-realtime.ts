@@ -1,62 +1,37 @@
 "use client";
 
-import { useEffect, useState, useMemo, useRef } from "react";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
+import { useEffect, useState } from "react";
 import { getMyStatsAction } from "@/app/actions/stats";
-import { getRealtimeAccessToken } from "@/app/actions/realtime";
 import type { UserStats } from "@/lib/admin";
 
 /**
- * Shared hook for live stats (givenToday / receivedToday) via Supabase
- * Realtime + periodic safety-net polling.
+ * Shared hook for live stats (givenToday / receivedToday) via SSE
+ * (/api/realtime) + periodic safety-net polling.
  *
- * Previously duplicated ~140 lines each in home-stats-client.tsx and
- * profile-stats-client.tsx. Consolidating saves bundle size, eliminates
- * the double-subscription when both components are mounted, and means
- * only one polling interval + one realtime channel per tab.
+ * Server actions publish `{"t":"like"}` to `chan:stats:{userId}` on every
+ * committed like; this hook bumps receivedToday on the event. The 180s
+ * polling + focus/visibility handlers stay as the authoritative fallback
+ * (same as the old Supabase Realtime hook).
  */
 export function useStatsRealtime(initialStats: UserStats, userId: string) {
   const [stats, setStats] = useState<UserStats>(initialStats);
-  const supabase = useMemo(() => createSupabaseBrowserClient(), []);
-  const statsRef = useRef(stats);
-  statsRef.current = stats;
 
   useEffect(() => {
     let cancelled = false;
-    let channel: ReturnType<typeof supabase.channel> | null = null;
+    let es: EventSource | null = null;
 
-    (async () => {
-      const token = await getRealtimeAccessToken();
-      if (cancelled || !token) return;
-      supabase.realtime.setAuth(token);
-
-      channel = supabase
-        .channel("stats_updates")
-        .on(
-          "postgres_changes",
-          {
-            event: "INSERT",
-            schema: "public",
-            table: "likes",
-            filter: `receiver_id=eq.${userId}`,
-          },
-          (payload) => {
-            if ((payload.new as { is_boosted_like?: boolean })?.is_boosted_like) return;
-            setStats((s) => ({ ...s, receivedToday: s.receivedToday + 1 }));
-          },
-        )
-        .subscribe((status) => {
-          if (status === "SUBSCRIBED") {
-            void getMyStatsAction().then((s) => {
-              if (!cancelled && s) setStats((prev) => ({
-                ...s,
-                givenToday: s.givenToday,
-                receivedToday: Math.max(prev.receivedToday, s.receivedToday),
-              }));
-            });
-          }
-        });
-    })();
+    es = new EventSource("/api/realtime");
+    es.onmessage = (event) => {
+      if (cancelled) return;
+      try {
+        const payload = JSON.parse(event.data) as { t?: string };
+        if (payload.t === "like") {
+          setStats((s) => ({ ...s, receivedToday: s.receivedToday + 1 }));
+        }
+      } catch {
+        // ignore malformed frames
+      }
+    };
 
     const setAuthoritative = (newStats: UserStats | null) => {
       if (cancelled || !newStats) return;
@@ -98,7 +73,7 @@ export function useStatsRealtime(initialStats: UserStats, userId: string) {
       }, 1500);
     };
 
-    // Safety-net poll: 180s fallback for silently-dropped WebSocket connections
+    // Safety-net poll: 180s fallback for silently-dropped SSE connections.
     const pollInterval = setInterval(() => {
       if (cancelled || document.hidden) return;
       void getMyStatsAction().then(setAuthoritative);
@@ -116,7 +91,7 @@ export function useStatsRealtime(initialStats: UserStats, userId: string) {
       if (updateTimer) clearTimeout(updateTimer);
       if (syncTimer) clearTimeout(syncTimer);
       clearInterval(pollInterval);
-      if (channel) supabase.removeChannel(channel);
+      if (es) es.close();
       if (typeof window !== "undefined") {
         window.removeEventListener("focus", handleFocus);
         document.removeEventListener("visibilitychange", handleFocus);
@@ -124,7 +99,7 @@ export function useStatsRealtime(initialStats: UserStats, userId: string) {
         window.removeEventListener("stats_sync", handleStatsSync);
       }
     };
-  }, [userId, supabase]);
+  }, [userId]);
 
   return stats;
 }

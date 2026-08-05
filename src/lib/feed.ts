@@ -1,7 +1,8 @@
 import "server-only";
 import { LINK_COOLDOWN_HOURS } from "@/lib/types";
 import { getSettings } from "@/lib/settings";
-import { supabase } from "@/lib/supabase";
+import { getEligibleFeedLinks } from "@/lib/repos/rpc";
+import { cacheGet, cacheSet } from "@/lib/redis";
 
 export type FeedLinkRow = {
   id: string;
@@ -11,34 +12,48 @@ export type FeedLinkRow = {
   isBoosted?: boolean;
 };
 
+// Per-viewer feed page cache. The feed RPC joins the DB-side eligibility
+// cache (cheap), but users poll the feed every ~60s — a 15s Redis TTL cuts
+// most RPC calls. Staleness is already accepted app-wide (likes_count drifts
+// until the next fetch), so no explicit invalidation.
+const FEED_CACHE_TTL_SECONDS = 15;
+
 export async function getFeed(
   viewerId: string,
   offset = 0,
   limit = 50,
 ): Promise<{ links: FeedLinkRow[]; nextOffset: number }> {
+  const cacheKey = `feed:${viewerId}:${offset}`;
+  const cached = await cacheGet<{ links: FeedLinkRow[]; nextOffset: number }>(cacheKey);
+  if (cached) return cached;
+
   const settings = await getSettings();
 
-  const { data: links, error } = await supabase.rpc("get_eligible_feed_links", {
-    viewer_id: viewerId,
-    p_active_like_count: settings.activeLikeCount,
-    p_active_window_hours: settings.activeWindowHours,
-    p_cooldown_hours: LINK_COOLDOWN_HOURS,
-    p_limit: limit,
-    p_offset: offset,
-  });
+  try {
+    const links = await getEligibleFeedLinks({
+      viewerId,
+      activeLikeCount: settings.activeLikeCount,
+      activeWindowHours: settings.activeWindowHours,
+      cooldownHours: LINK_COOLDOWN_HOURS,
+      limit,
+      offset,
+    });
 
-  if (error || !links) {
-    console.error("[feed] get_eligible_feed_links error:", error?.message);
+    const formattedLinks: FeedLinkRow[] = links.map((l) => ({
+      id: l.id,
+      url: l.url,
+      likesCount: l.likes_count,
+      anonymous: l.anonymous,
+      isBoosted: l.is_boosted,
+    }));
+
+    const result = { links: formattedLinks, nextOffset: offset + formattedLinks.length };
+    await cacheSet(cacheKey, result, FEED_CACHE_TTL_SECONDS);
+    return result;
+  } catch (err) {
+    console.error("[feed] get_eligible_feed_links error:", (err as Error).message);
+    // Don't cache failures — a transient outage shouldn't freeze an empty
+    // feed for the next 15s.
     return { links: [], nextOffset: offset };
   }
-
-  const formattedLinks: FeedLinkRow[] = links.map((l: any) => ({
-    id: l.id,
-    url: l.url,
-    likesCount: l.likes_count,
-    anonymous: l.anonymous,
-    isBoosted: l.is_boosted,
-  }));
-
-  return { links: formattedLinks, nextOffset: offset + formattedLinks.length };
 }

@@ -1,8 +1,9 @@
 import "server-only";
 import { cache } from "react";
 import { redirect } from "next/navigation";
-import { supabase, Profile } from "@/lib/supabase";
 import { getSession } from "@/lib/session";
+import { getProfile, type ProfileRow } from "@/lib/repos/profiles";
+import { cacheGet, cacheSet } from "@/lib/redis";
 import type { AdminProfile, FeatureModel, ProfileStatus, PublicProfile, Role } from "@/lib/types";
 
 export type SessionProfile = {
@@ -36,28 +37,16 @@ export type SessionProfile = {
   createdAt: string;
 };
 
-export const getCurrentUser = cache(async (): Promise<SessionProfile | null> => {
-  const session = await getSession();
-  if (!session) return null;
-
-  const { data, error } = await supabase
-    .from("profiles")
-    .select("*")
-    .eq("id", session.sub)
-    .single();
-
-  if (error || !data) return null;
-
-  const row = data as Profile;
+function rowToSessionProfile(row: ProfileRow): SessionProfile {
   return {
     id: row.id,
-    publicId: row.public_id,
-    firstName: row.first_name,
-    lastName: row.last_name,
-    phone: row.phone,
-    email: row.email,
+    publicId: row.public_id ?? "",
+    firstName: row.first_name ?? "",
+    lastName: row.last_name ?? "",
+    phone: row.phone ?? "",
+    email: row.email ?? "",
     role: row.role as Role,
-    status: row.status as "pending" | "approved" | "rejected",
+    status: row.status as ProfileStatus,
     isElite: Boolean(row.is_elite),
     isBoosted: Boolean(row.is_boosted),
     boostOrder: row.boost_order,
@@ -79,6 +68,28 @@ export const getCurrentUser = cache(async (): Promise<SessionProfile | null> => 
     approvedBy: row.approved_by,
     createdAt: row.created_at,
   };
+}
+
+/**
+ * Current user's full profile. React-cached per request, Redis-cached across
+ * requests (60s TTL, invalidated on profile writes — see profile-cache.ts).
+ * THIS is the real authorization boundary: every require* guard and every
+ * privileged action re-reads role/status here, so an admin's changes
+ * converge within ~60s even though the middleware's JWT claims are stale.
+ */
+export const getCurrentUser = cache(async (): Promise<SessionProfile | null> => {
+  const session = await getSession();
+  if (!session) return null;
+
+  const cached = await cacheGet<SessionProfile>(`profile:${session.sub}`);
+  if (cached) return cached;
+
+  const row = await getProfile(session.sub);
+  if (!row) return null;
+
+  const profile = rowToSessionProfile(row);
+  await cacheSet(`profile:${session.sub}`, profile, 60);
+  return profile;
 });
 
 export function toPublicProfile(p: SessionProfile): PublicProfile {

@@ -1,7 +1,8 @@
 import { NextResponse } from "next/server";
 import { getCurrentUser } from "@/lib/auth";
 import { getAutoLikeStatus } from "@/lib/autolike";
-import { supabase } from "@/lib/supabase";
+import { updateProfile } from "@/lib/repos/profiles";
+import { invalidateProfileCache } from "@/lib/profile-cache";
 
 export async function GET() {
   const user = await getCurrentUser();
@@ -18,12 +19,8 @@ export async function POST(request: Request) {
   }
 
   // Fail CLOSED: a same-origin browser fetch() for a state-changing POST like
-  // this always sends an Origin header (and virtually always a Referer too),
-  // so a request with NEITHER present is not a legitimate first-party call —
-  // it's most likely a cross-origin request from a context that omits both
-  // (e.g. a bare HTTP client, or a request crafted to dodge this check).
-  // Previously this block was skipped entirely when both were absent, which
-  // let such a request through unchecked.
+  // this always sends an Origin header — a request with NEITHER present is
+  // not a legitimate first-party call.
   const origin = request.headers.get("origin") || request.headers.get("referer");
   const host = request.headers.get("x-forwarded-host") || request.headers.get("host");
   if (!origin || !host) {
@@ -40,9 +37,8 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "invalid origin" }, { status: 403 });
   }
 
-  // Reuse the already-fetched (React-cache-deduped) profile from
-  // getCurrentUser() at the top of this handler instead of issuing a
-  // second, identical `profiles.select("*")` for the same row.
+  // Reuse the already-fetched profile from getCurrentUser() at the top of
+  // this handler (React-cache-deduped).
   const { action } = await request.json();
 
   if (action === "pause") {
@@ -69,16 +65,14 @@ export async function POST(request: Request) {
       );
     }
 
-    await supabase
-      .from("profiles")
-      .update({
-        auto_like_paused: true,
-        auto_like_paused_remaining_minutes: paidRemainingMins,
-        free_autolike_paused_remaining_minutes: freeRemainingMins,
-        auto_like_expiry: null,
-        free_autolike_until: null,
-      })
-      .eq("id", user.id);
+    await updateProfile(user.id, {
+      auto_like_paused: true,
+      auto_like_paused_remaining_minutes: paidRemainingMins,
+      free_autolike_paused_remaining_minutes: freeRemainingMins,
+      auto_like_expiry: null,
+      free_autolike_until: null,
+    });
+    await invalidateProfileCache(user.id);
 
   } else if (action === "resume") {
     if (!user.autoLikePaused) {
@@ -95,16 +89,14 @@ export async function POST(request: Request) {
       newFreeUntil = new Date(Date.now() + user.freeAutolikePausedRemainingMinutes * 60000).toISOString();
     }
 
-    await supabase
-      .from("profiles")
-      .update({
-        auto_like_paused: false,
-        auto_like_paused_remaining_minutes: null,
-        free_autolike_paused_remaining_minutes: null,
-        auto_like_expiry: newPaidExpiry,
-        free_autolike_until: newFreeUntil,
-      })
-      .eq("id", user.id);
+    await updateProfile(user.id, {
+      auto_like_paused: false,
+      auto_like_paused_remaining_minutes: null,
+      free_autolike_paused_remaining_minutes: null,
+      auto_like_expiry: newPaidExpiry,
+      free_autolike_until: newFreeUntil,
+    });
+    await invalidateProfileCache(user.id);
   }
 
   return NextResponse.json(await getAutoLikeStatus());

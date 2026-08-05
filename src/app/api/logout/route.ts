@@ -1,30 +1,29 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import { SESSION_COOKIE_NAME } from "@/lib/session-cookie";
 
 /**
  * GET: used by server-side redirects (e.g. requireUser → redirect("/api/logout")).
- * Adds an Origin check to prevent cross-site logout CSRF attacks where an
- * attacker embeds <img src="https://target.com/api/logout"> to forcibly log
- * out a victim.
+ * POST: programmatic client-initiated logouts.
+ * Both clear the `sd_session` cookie (was Supabase's signOut()).
+ * Origin check prevents cross-site logout CSRF (embedded <img> attacks).
  */
-export async function GET(request: NextRequest) {
-  // ── CSRF protection: reject cross-origin GET requests ──────────────
+async function handleLogout(request: NextRequest) {
+  // ── CSRF protection: reject cross-origin requests ──────────────────
   const origin = request.headers.get("origin");
   const host = request.headers.get("host");
   if (origin && host && !origin.endsWith(host)) {
     return new NextResponse("Forbidden", { status: 403 });
   }
 
-  const supabase = await createSupabaseServerClient();
-  await supabase.auth.signOut();
-  const url = new URL(request.url);
-  return NextResponse.redirect(new URL("/login", url.origin));
+  const response = NextResponse.redirect(new URL("/login", request.url));
+  response.cookies.set(SESSION_COOKIE_NAME, "", { maxAge: 0, path: "/" });
+  return response;
 }
 
-/**
- * POST: alternative for programmatic client-initiated logouts.
- * Same CSRF protection via Origin check.
- */
+export async function GET(request: NextRequest) {
+  return handleLogout(request);
+}
+
 export async function POST(request: NextRequest) {
-  return GET(request);
+  return handleLogout(request);
 }

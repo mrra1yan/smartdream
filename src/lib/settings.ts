@@ -1,6 +1,7 @@
 import "server-only";
 import { cache } from "react";
-import { supabase, Settings } from "@/lib/supabase";
+import { getSettingsRow } from "@/lib/repos/settings";
+import { cacheGet, cacheSet, cacheDel } from "@/lib/redis";
 
 export type SiteSettings = {
   whatsappNumber: string;
@@ -54,58 +55,42 @@ const DEFAULTS: SiteSettings = {
   referralRewardRefereeMinutes: 30,
 };
 
-// Module-level TTL cache, shared across requests on the same warm
-// server/isolate (React's cache() below only dedupes within a single
-// request). getSettings() is called on nearly every page load and on every
-// like commit, but the settings row itself only ever changes when an admin
-// edits it via the settings page -- so refetching it fresh on every single
-// request is a lot of Supabase egress for data that's the same 99.9% of the
-// time. A 45s staleness window is the trade-off: an admin's settings change
-// can take up to 45s to take effect everywhere, same order of magnitude as
-// the staleness already accepted for feed likes_count.
-const SETTINGS_CACHE_TTL_MS = 45_000;
-let cachedSettings: { value: SiteSettings; expiresAt: number } | null = null;
+// Shared Redis TTL cache (60s) — replaces the old per-isolate in-memory 45s
+// cache; works across multiple server instances. getSettings() is called on
+// nearly every page load and every like commit; the row only changes when an
+// admin edits it. An admin's change takes up to 60s to propagate — same
+// trade-off as before (45s in-memory).
+const SETTINGS_CACHE_TTL_SECONDS = 60;
+const SETTINGS_CACHE_KEY = "settings";
 
 /** Call after any write to the `settings` table so the admin who just saved
- * sees their own change immediately instead of waiting out the TTL. */
-export function invalidateSettingsCache(): void {
-  cachedSettings = null;
+ *  sees their own change immediately. */
+export async function invalidateSettingsCache(): Promise<void> {
+  await cacheDel(SETTINGS_CACHE_KEY);
 }
 
 export const getSettings = cache(async (): Promise<SiteSettings> => {
-  if (cachedSettings && cachedSettings.expiresAt > Date.now()) {
-    return cachedSettings.value;
-  }
+  const cached = await cacheGet<SiteSettings>(SETTINGS_CACHE_KEY);
+  if (cached) return cached;
 
-  let row: Settings | undefined;
-
+  let row: Awaited<ReturnType<typeof getSettingsRow>>;
   try {
-    const { data, error } = await supabase
-      .from("settings")
-      .select("*")
-      .eq("id", "1")
-      .single();
-
-    if (error || !data) {
-      throw new Error("Settings not found");
-    }
-    row = data as Settings;
+    row = await getSettingsRow();
+    if (!row) throw new Error("Settings not found");
   } catch (error) {
     console.error("[SETTINGS] Unable to load site settings:", error);
-    // Don't cache a failure -- a transient outage shouldn't force every
-    // request for the next 45s to silently fall back to DEFAULTS once the
-    // DB recovers before the TTL expires.
-    return cachedSettings?.value ?? DEFAULTS;
+    // Don't cache a failure — a transient outage shouldn't force every
+    // request for the next 60s to silently fall back to DEFAULTS.
+    return DEFAULTS;
   }
 
-  const settings = {
+  const settings: SiteSettings = {
     whatsappNumber: row.whatsapp_number ?? "",
     activeLikeCount: row.active_like_count ?? DEFAULTS.activeLikeCount,
     activeWindowHours: row.active_window_hours ?? DEFAULTS.activeWindowHours,
     eliteWeight: row.elite_weight ?? DEFAULTS.eliteWeight,
     offerLikesRequired: row.offer_likes_required ?? DEFAULTS.offerLikesRequired,
-    offerAutoLikeMinutes:
-      row.offer_autolike_minutes ?? DEFAULTS.offerAutoLikeMinutes,
+    offerAutoLikeMinutes: row.offer_autolike_minutes ?? DEFAULTS.offerAutoLikeMinutes,
     offerActive: row.offer_active ?? DEFAULTS.offerActive,
     boostPriceNoExpiry: row.boost_price_no_expiry ?? null,
     boostPrice1w: row.boost_price_1w ?? null,
@@ -125,6 +110,6 @@ export const getSettings = cache(async (): Promise<SiteSettings> => {
     referralRewardRefereeMinutes: row.referral_reward_referee_minutes ?? DEFAULTS.referralRewardRefereeMinutes,
   };
 
-  cachedSettings = { value: settings, expiresAt: Date.now() + SETTINGS_CACHE_TTL_MS };
+  await cacheSet(SETTINGS_CACHE_KEY, settings, SETTINGS_CACHE_TTL_SECONDS);
   return settings;
 });

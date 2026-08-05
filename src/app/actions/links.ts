@@ -2,9 +2,16 @@
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
-import { supabase } from "@/lib/supabase";
 import { getCurrentUser } from "@/lib/auth";
 import { MAX_LINKS_PER_USER } from "@/lib/types";
+import { addLinksAtomic } from "@/lib/repos/rpc";
+import {
+  softDeleteLink,
+  softDeleteLinks,
+  updateLink as repoUpdateLink,
+} from "@/lib/repos/links";
+import { publishLinksUpdate } from "@/lib/realtime-publish";
+import { getUserLinks as repoGetUserLinks } from "@/lib/repos/links";
 
 const UrlSchema = z
   .string()
@@ -16,14 +23,18 @@ const UrlSchema = z
 
 export type LinkFormState = { error?: string; ok?: boolean } | undefined;
 
+/** Lightweight refetch for the links-manager SSE handler — returns just the
+ *  id → likes_count map so live likes from other users update in place
+ *  without clobbering the user's own in-progress edits. */
+export async function getMyLinkCounts(): Promise<{ id: string; likesCount: number }[]> {
+  const user = await getCurrentUser();
+  if (!user || user.status !== "approved") return [];
+  const rows = await repoGetUserLinks(user.id);
+  return rows.map((r) => ({ id: r.id, likesCount: r.likes_count }));
+}
+
 export type BulkAddResult = { added: number; skipped: number; error?: string };
 export type BulkDeleteResult = { deleted: number; error?: string };
-
-// Soft-delete marker: negative seconds since epoch. Stays within PostgreSQL
-// `integer` range and is bigint-safe after migration.
-function deletedSortOrder(): number {
-  return -Math.floor(Date.now() / 1000);
-}
 
 export async function addLink(_state: LinkFormState, formData: FormData) {
   const user = await getCurrentUser();
@@ -35,20 +46,19 @@ export async function addLink(_state: LinkFormState, formData: FormData) {
 
   const id = globalThis.crypto.randomUUID();
 
-  // Atomic count-check-and-insert (one RPC call = one transaction, serialized
-  // per-user via an advisory lock) instead of a separate SELECT count then
-  // INSERT — the old two-step version let two concurrent addLink calls both
-  // pass the quota check before either insert committed.
-  const { data: inserted, error } = await supabase.rpc("add_links_atomic", {
-    p_user_id: user.id,
-    p_rows: [{ id, url: parsed.data }],
-    p_max_links: MAX_LINKS_PER_USER,
-  });
-
-  if (error || !inserted) {
+  // Atomic count-check-and-insert (one CALL = one stored procedure,
+  // serialized per-user via a named lock) — closes the quota race.
+  try {
+    const inserted = await addLinksAtomic(user.id, [{ id, url: parsed.data }], MAX_LINKS_PER_USER);
+    if (!inserted) {
+      return { error: `You can only add up to ${MAX_LINKS_PER_USER} links.` };
+    }
+  } catch (err) {
+    console.error("addLink error:", err);
     return { error: `You can only add up to ${MAX_LINKS_PER_USER} links.` };
   }
 
+  await publishLinksUpdate(user.id);
   revalidatePath("/links");
   return { ok: true };
 }
@@ -65,16 +75,14 @@ export async function updateLink(
   const parsed = UrlSchema.safeParse(String(formData.get("url") ?? "").trim());
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
-  const { error } = await supabase
-    .from("links")
-    .update({ url: parsed.data })
-    .eq("id", linkId)
-    .eq("user_id", user.id);
-
-  if (error) {
+  try {
+    await repoUpdateLink(linkId, user.id, parsed.data);
+  } catch (err) {
+    console.error("updateLink error:", err);
     return { error: "Failed to update link" };
   }
 
+  await publishLinksUpdate(user.id);
   revalidatePath("/links");
   return { ok: true };
 }
@@ -83,19 +91,13 @@ export async function deleteLink(linkId: string) {
   const user = await getCurrentUser();
   if (!user || user.role !== "user" || user.status !== "approved") return;
 
-  // Soft-delete: mark with a negative sort_order so it's excluded by `>= 0`
-  // filters. Use seconds (not ms) so the value stays within PostgreSQL's
-  // `integer` range (max ~2.1B). bigint-safe too once migrated.
-  const { error } = await supabase
-    .from("links")
-    .update({ url: "https://deleted.local", sort_order: deletedSortOrder() })
-    .eq("id", linkId)
-    .eq("user_id", user.id);
-
-  if (error) {
-    console.error("deleteLink error:", error);
+  try {
+    await softDeleteLink(linkId, user.id);
+  } catch (err) {
+    console.error("deleteLink error:", err);
   }
 
+  await publishLinksUpdate(user.id);
   revalidatePath("/links");
 }
 
@@ -124,24 +126,23 @@ export async function addLinks(urls: string[]): Promise<BulkAddResult> {
     return { added: 0, skipped: invalid, error: invalid > 0 ? "No valid URLs provided." : undefined };
   }
 
-  // Atomic count-check-and-insert, same RPC as addLink — pass every valid
-  // URL and let the DB-side advisory lock + count decide how many actually
-  // fit, instead of pre-slicing here against a racy outer SELECT count.
+  // Atomic count-check-and-insert — pass every valid URL and let the DB-side
+  // named lock + count decide how many actually fit.
   const rows = valid.map((url) => ({ id: globalThis.crypto.randomUUID(), url }));
 
-  const { data: insertedCount, error } = await supabase.rpc("add_links_atomic", {
-    p_user_id: user.id,
-    p_rows: rows,
-    p_max_links: MAX_LINKS_PER_USER,
-  });
-
-  if (error) {
+  let added: number;
+  try {
+    added = await addLinksAtomic(user.id, rows, MAX_LINKS_PER_USER);
+  } catch (err) {
+    console.error("addLinks error:", err);
     return { added: 0, skipped: valid.length + invalid, error: "Failed to add links." };
   }
 
-  const added = insertedCount ?? 0;
   const skippedByQuota = valid.length - added;
-  if (added > 0) revalidatePath("/links");
+  if (added > 0) {
+    await publishLinksUpdate(user.id);
+    revalidatePath("/links");
+  }
   return {
     added,
     skipped: skippedByQuota + invalid,
@@ -160,18 +161,15 @@ export async function deleteLinks(linkIds: string[]): Promise<BulkDeleteResult> 
     return { deleted: 0 };
   }
 
-  const { data, error } = await supabase
-    .from("links")
-    .update({ url: "https://deleted.local", sort_order: deletedSortOrder() })
-    .in("id", linkIds)
-    .eq("user_id", user.id)
-    .select("id");
-
-  if (error) {
-    console.error("deleteLinks error:", error);
+  let deleted: number;
+  try {
+    deleted = await softDeleteLinks(linkIds, user.id);
+  } catch (err) {
+    console.error("deleteLinks error:", err);
     return { deleted: 0, error: "Failed to delete links." };
   }
 
+  await publishLinksUpdate(user.id);
   revalidatePath("/links");
-  return { deleted: data ? data.length : 0 };
+  return { deleted };
 }

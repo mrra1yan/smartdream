@@ -2,12 +2,26 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { supabase } from "@/lib/supabase";
-import { supabaseAdmin } from "@/lib/supabase/admin";
+import bcrypt from "bcryptjs";
 import { requireSuperAdmin } from "@/lib/auth";
 import { getReferralStats } from "@/lib/admin";
 import { logAudit } from "@/lib/audit";
 import { invalidateSettingsCache } from "@/lib/settings";
+import {
+  deleteProfile,
+  findProfileByEmail,
+  findProfileByPhone,
+  getProfileMeta,
+  insertProfile,
+  nullOutApprovedBy,
+  nullOutReferredBy,
+  updateProfile,
+} from "@/lib/repos/profiles";
+import { deleteLikesByLiker, deleteLikesByReceiver } from "@/lib/repos/likes";
+import { deleteLinksByUser } from "@/lib/repos/links";
+import { nullOutBlogCreator } from "@/lib/repos/blogs";
+import { updateSettingsRow } from "@/lib/repos/settings";
+import { invalidateProfileCache } from "@/lib/profile-cache";
 
 export type SuperResult = { ok?: boolean; error?: string };
 
@@ -37,72 +51,64 @@ function generatePublicId() {
   return String(rand);
 }
 
-function iso() {
-  return new Date().toISOString();
-}
-
 async function failIfSuperAdmin(targetId: string) {
-  const { data } = await supabase
-    .from("profiles")
-    .select("role")
-    .eq("id", targetId)
-    .single();
-
-  if (!data) throw new Error("User not found");
-  if ((data as any).role === "super_admin") throw new Error("Cannot modify super_admin users");
+  const meta = await getProfileMeta(targetId);
+  if (!meta) throw new Error("User not found");
+  if (meta.role === "super_admin") throw new Error("Cannot modify super_admin users");
 }
 
-export async function createEliteUser(args: CreateArgs) {
+/** Shared create-user path (was auth.admin.createUser + trigger + promote —
+ *  now a single INSERT with the bcrypt hash, since profiles IS the user). */
+async function createUserInternal(
+  args: CreateArgs,
+  opts: { role: "user" | "admin"; isElite: boolean; action: string },
+): Promise<SuperResult> {
   const me = await requireSuperAdmin();
   const parsed = CreateUserSchema.safeParse(args);
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
-  const [{ data: existingEmail }, { data: existingPhone }] = await Promise.all([
-    supabase.from("profiles").select("id").eq("email", parsed.data.email).single(),
-    supabase.from("profiles").select("id").eq("phone", parsed.data.phone).single(),
+  const [existingEmail, existingPhone] = await Promise.all([
+    findProfileByEmail(parsed.data.email),
+    findProfileByPhone(parsed.data.phone),
   ]);
 
   if (existingEmail) return { error: "Email already exists." };
   if (existingPhone) return { error: "Phone number already exists." };
 
-  // Create the auth user. The DB trigger auto-creates a `profiles` row with
-  // status = 'pending' and role = 'user'; we then promote it to elite+approved.
-  const { data, error } = await supabaseAdmin.auth.admin.createUser({
-    email: parsed.data.email,
-    password: parsed.data.password,
-    email_confirm: true,
-    user_metadata: {
+  const id = globalThis.crypto.randomUUID();
+  const passwordHash = await bcrypt.hash(parsed.data.password, 10);
+
+  try {
+    await insertProfile({
+      id,
+      public_id: generatePublicId(),
       first_name: parsed.data.firstName,
       last_name: parsed.data.lastName,
       phone: parsed.data.phone,
-      role: "user",
+      email: parsed.data.email,
+      password_hash: passwordHash,
+      role: opts.role,
       status: "approved",
-    },
-  });
-
-  if (error || !data.user) {
-    return { error: "Failed to create elite user" };
+    });
+    if (opts.isElite) {
+      await updateProfile(id, { is_elite: true });
+    }
+  } catch (err) {
+    console.error("createUserInternal error:", err);
+    return { error: "Failed to create user" };
   }
 
-  // Upgrade the auto-created profile to elite + approved.
-  const { error: profileError } = await supabase
-    .from("profiles")
-    .update({
-      public_id: generatePublicId(),
-      is_elite: true,
-      status: "approved",
-      created_at: iso(),
-    })
-    .eq("id", data.user.id);
+  await logAudit(me, opts.action, id, { email: parsed.data.email });
+  return { ok: true, _userId: id } as unknown as SuperResult;
+}
 
-  if (profileError) {
-    return { error: "Failed to create elite user" };
-  }
-
-  await logAudit(me, "create_elite_user", data.user.id, {
-    email: parsed.data.email,
+export async function createEliteUser(args: CreateArgs) {
+  const result = await createUserInternal(args, {
+    role: "user",
+    isElite: true,
+    action: "create_elite_user",
   });
-
+  if (!result.ok) return result;
   revalidatePath("/super-admin");
   revalidatePath("/super-admin/elite");
   return { ok: true };
@@ -114,20 +120,18 @@ export async function deleteEliteUser(userId: string): Promise<SuperResult> {
     await failIfSuperAdmin(userId);
 
     // None of these 6 cleanup statements depend on each other's results, so
-    // run them concurrently instead of paying 6 sequential round-trips.
+    // run them concurrently.
     await Promise.all([
-      supabase.from("likes").delete().eq("liker_id", userId),
-      supabase.from("likes").delete().eq("receiver_id", userId),
-      supabase.from("links").delete().eq("user_id", userId),
-      supabase.from("blogs").update({ created_by: null }).eq("created_by", userId),
-      supabase.from("profiles").update({ referred_by: null }).eq("referred_by", userId),
-      supabase.from("profiles").update({ approved_by: null }).eq("approved_by", userId),
+      deleteLikesByLiker(userId),
+      deleteLikesByReceiver(userId),
+      deleteLinksByUser(userId),
+      nullOutBlogCreator(userId),
+      nullOutReferredBy(userId),
+      nullOutApprovedBy(userId),
     ]);
 
-    const { error } = await supabaseAdmin.auth.admin.deleteUser(userId);
-    if (error) {
-      return { error: "Failed to delete elite user" };
-    }
+    await deleteProfile(userId);
+    await invalidateProfileCache(userId);
 
     await logAudit(me, "delete_elite_user", userId);
 
@@ -146,14 +150,10 @@ export async function resetElitePassword(userId: string, password: string): Prom
     await failIfSuperAdmin(userId);
     if (password.length < 8) return { error: "Password must be at least 8 characters." };
 
-    // Passwords live in Supabase Auth. Use the admin client to set it.
-    const { error } = await supabaseAdmin.auth.admin.updateUserById(userId, {
-      password,
-    });
-
-    if (error) {
-      return { error: "Failed to reset password" };
-    }
+    // Passwords now live on the profiles row (bcrypt hash).
+    const hash = await bcrypt.hash(password, 10);
+    await updateProfile(userId, { password_hash: hash });
+    await invalidateProfileCache(userId);
 
     await logAudit(me, "reset_elite_password", userId);
 
@@ -169,14 +169,8 @@ export async function promoteToAdmin(userId: string): Promise<SuperResult> {
     const me = await requireSuperAdmin();
     await failIfSuperAdmin(userId);
 
-    const { error } = await supabase
-      .from("profiles")
-      .update({ role: "admin", status: "approved" })
-      .eq("id", userId);
-
-    if (error) {
-      return { error: "Failed to promote user" };
-    }
+    await updateProfile(userId, { role: "admin", status: "approved" });
+    await invalidateProfileCache(userId);
 
     await logAudit(me, "promote_to_admin", userId, { new_role: "admin" });
 
@@ -194,14 +188,8 @@ export async function demoteAdmin(userId: string): Promise<SuperResult> {
     const me = await requireSuperAdmin();
     await failIfSuperAdmin(userId);
 
-    const { error } = await supabase
-      .from("profiles")
-      .update({ role: "user" })
-      .eq("id", userId);
-
-    if (error) {
-      return { error: "Failed to demote admin" };
-    }
+    await updateProfile(userId, { role: "user" });
+    await invalidateProfileCache(userId);
 
     await logAudit(me, "demote_admin", userId, { old_role: "admin", new_role: "user" });
 
@@ -215,80 +203,35 @@ export async function demoteAdmin(userId: string): Promise<SuperResult> {
 }
 
 export async function createAdmin(args: CreateArgs) {
-  const me = await requireSuperAdmin();
-  const parsed = CreateUserSchema.safeParse(args);
-  if (!parsed.success) return { error: parsed.error.issues[0].message };
-
-  const [{ data: existingEmail }, { data: existingPhone }] = await Promise.all([
-    supabase.from("profiles").select("id").eq("email", parsed.data.email).single(),
-    supabase.from("profiles").select("id").eq("phone", parsed.data.phone).single(),
-  ]);
-
-  if (existingEmail) return { error: "Email already exists." };
-  if (existingPhone) return { error: "Phone number already exists." };
-
-  // Create the auth user. The DB trigger auto-creates a `profiles` row; we
-  // then promote it to role = admin, status = approved.
-  const { data, error } = await supabaseAdmin.auth.admin.createUser({
-    email: parsed.data.email,
-    password: parsed.data.password,
-    email_confirm: true,
-    user_metadata: {
-      first_name: parsed.data.firstName,
-      last_name: parsed.data.lastName,
-      phone: parsed.data.phone,
-      role: "admin",
-      status: "approved",
-    },
+  const result = await createUserInternal(args, {
+    role: "admin",
+    isElite: false,
+    action: "create_admin",
   });
-
-  if (error || !data.user) {
-    return { error: "Failed to create admin" };
-  }
-
-  const { error: profileError } = await supabase
-    .from("profiles")
-    .update({
-      public_id: generatePublicId(),
-      role: "admin",
-      status: "approved",
-      created_at: iso(),
-    })
-    .eq("id", data.user.id);
-
-  if (profileError) {
-    return { error: "Failed to create admin" };
-  }
-
-  await logAudit(me, "create_admin", data.user.id, { email: parsed.data.email });
-
+  if (!result.ok) return result;
   revalidatePath("/super-admin");
   revalidatePath("/super-admin/admins");
   return { ok: true };
 }
 
-// NOTE: settings.elite_weight (the value this writes) is not currently read
-// by the feed ranking -- elite links are an unconditional priority tier, not
-// a weighted one (see the comment on `combined` in src/lib/feed.ts). No UI
-// currently calls this action; kept as a working, permission-gated write
-// path in case elite ranking becomes weight-based again in the future.
+// NOTE: settings.elite_weight is not currently read by the feed ranking —
+// elite links are an unconditional priority tier, not a weighted one. No UI
+// currently calls this action; kept as a working, permission-gated write path.
 export async function setEliteWeight(value: number): Promise<SuperResult> {
   const me = await requireSuperAdmin();
   if (!Number.isFinite(value) || value < 0 || value > 1000) {
     return { error: "elite_weight must be between 0 and 1000." };
   }
 
-  const { error } = await supabase
-    .from("settings")
-    .update({ elite_weight: Math.round(value), updated_at: iso() })
-    .eq("id", "1");
-
-  if (error) {
+  try {
+    await updateSettingsRow({ elite_weight: Math.round(value) });
+  } catch (err) {
+    console.error("setEliteWeight error:", err);
     return { error: "Failed to update elite weight" };
   }
 
   await logAudit(me, "set_elite_weight", null, { value: Math.round(value) });
-  invalidateSettingsCache();
+  await invalidateSettingsCache();
 
   revalidatePath("/super-admin/settings");
   return { ok: true };
@@ -299,11 +242,6 @@ export type LevelReferralSettingsArgs = {
   referralRewardRefereeMinutes: number;
 };
 
-// Mirrors setEliteWeight's bounds-checking pattern. Cap chosen as a generous
-// but sane upper bound for a "minutes of free auto-like" reward: 525,600
-// minutes == 1 non-leap year. Anything beyond that is almost certainly a
-// fat-fingered input (e.g. entering seconds/hours by mistake) rather than an
-// intended setting.
 const MAX_REFERRAL_REWARD_MINUTES = 525_600;
 
 export async function setLevelReferralSettings(args: LevelReferralSettingsArgs): Promise<SuperResult> {
@@ -326,21 +264,13 @@ export async function setLevelReferralSettings(args: LevelReferralSettingsArgs):
     return { error: `referralRewardRefereeMinutes must be between 0 and ${MAX_REFERRAL_REWARD_MINUTES}.` };
   }
 
-  // NOTE: the `settings` table columns are snake_case
-  // (referral_reward_referrer_minutes / referral_reward_referee_minutes,
-  // see `Settings` in @/lib/supabase); previously this spread the camelCase
-  // `args` object straight into `.update()`, which silently targeted
-  // nonexistent columns and always failed. Map explicitly instead.
-  const { error } = await supabase
-    .from("settings")
-    .update({
+  try {
+    await updateSettingsRow({
       referral_reward_referrer_minutes: Math.round(referralRewardReferrerMinutes),
       referral_reward_referee_minutes: Math.round(referralRewardRefereeMinutes),
-      updated_at: iso(),
-    })
-    .eq("id", "1");
-
-  if (error) {
+    });
+  } catch (err) {
+    console.error("setLevelReferralSettings error:", err);
     return { error: "Failed to update referral settings" };
   }
 
@@ -348,7 +278,7 @@ export async function setLevelReferralSettings(args: LevelReferralSettingsArgs):
     referral_reward_referrer_minutes: Math.round(referralRewardReferrerMinutes),
     referral_reward_referee_minutes: Math.round(referralRewardRefereeMinutes),
   });
-  invalidateSettingsCache();
+  await invalidateSettingsCache();
 
   revalidatePath("/super-admin/settings");
   return { ok: true };

@@ -1,6 +1,6 @@
 import "server-only";
-import { supabase } from "@/lib/supabase";
 import { getSession } from "@/lib/session";
+import { getMyStats as rpcGetMyStats } from "@/lib/repos/rpc";
 import { bangladeshMidnightISO } from "@/lib/timezone";
 
 export type MyStats = {
@@ -23,7 +23,6 @@ function hoursAgoISO(h: number): string {
   return new Date(Date.now() - h * 3600000).toISOString();
 }
 
-
 export async function getMyStats(): Promise<MyStats> {
   const session = await getSession();
   if (!session) return ZERO;
@@ -32,23 +31,19 @@ export async function getMyStats(): Promise<MyStats> {
   const todayIso = bangladeshMidnightISO();
   const minus24hIso = hoursAgoISO(24);
 
-  const { data, error } = await supabase.rpc("get_my_stats", {
-    viewer_id: userId,
-    today_iso: todayIso,
-    minus24h_iso: minus24hIso,
-  });
+  try {
+    const row = await rpcGetMyStats(userId, todayIso, minus24hIso);
+    if (!row) return ZERO;
 
-  if (error || !data || data.length === 0) return ZERO;
-
-  const row = data[0] as any;
-  const given24h = Number(row.given_24h) || 0;
-  const received24h = Number(row.received_24h) || 0;
-
-  return {
-    givenToday: Number(row.given_today) || 0,
-    receivedToday: Number(row.received_today) || 0,
-    given24h,
-    received24h,
-    deficit: Math.max(0, given24h - received24h),
-  };
+    return {
+      givenToday: row.givenToday,
+      receivedToday: row.receivedToday,
+      given24h: row.given24h,
+      received24h: row.received24h,
+      deficit: Math.max(0, row.given24h - row.received24h),
+    };
+  } catch (err) {
+    console.error("[stats] get_my_stats error:", (err as Error).message);
+    return ZERO;
+  }
 }

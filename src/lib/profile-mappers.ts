@@ -1,33 +1,33 @@
-import type { Profile } from "@/lib/supabase";
+import type { ProfileRow } from "@/lib/repos/profiles";
 import type { AdminProfile } from "@/lib/types";
 
 /**
- * Map a Supabase `profiles` row (snake_case columns) to the app-facing
- * `AdminProfile` (camelCase). Supabase returns rows in the database's
- * snake_case; this is the only correct way to bridge that to the UI types.
+ * Map a profiles row (snake_case columns) to the app-facing `AdminProfile`
+ * (camelCase). MySQL rows come back in the database's snake_case; this is
+ * the only correct way to bridge that to the UI types.
  *
  * Mirrors the field mapping in `getCurrentUser` (`src/lib/auth.ts`).
  */
-export function profileRowToAdmin(row: Profile): AdminProfile {
+export function profileRowToAdmin(row: ProfileRow): AdminProfile {
   return {
     id: row.id,
-    publicId: row.public_id,
-    firstName: row.first_name,
-    lastName: row.last_name,
-    phone: row.phone,
-    email: row.email,
-    role: row.role,
-    status: row.status,
+    publicId: row.public_id ?? "",
+    firstName: row.first_name ?? "",
+    lastName: row.last_name ?? "",
+    phone: row.phone ?? "",
+    email: row.email ?? "",
+    role: row.role as AdminProfile["role"],
+    status: row.status as AdminProfile["status"],
     createdAt: row.created_at,
     isElite: Boolean(row.is_elite),
     isBoosted: Boolean(row.is_boosted),
     boostOrder: row.boost_order,
-    boostModel: row.boost_model,
+    boostModel: row.boost_model as AdminProfile["boostModel"],
     boostExpiry: row.boost_expiry,
     boostQuota: row.boost_quota,
     boostUsed: row.boost_used,
     autoLikeEnabled: Boolean(row.auto_like_enabled),
-    autoLikeModel: row.auto_like_model,
+    autoLikeModel: row.auto_like_model as AdminProfile["autoLikeModel"],
     autoLikePaused: Boolean(row.auto_like_paused),
     autoLikeExpiry: row.auto_like_expiry,
     autoLikeQuota: row.auto_like_quota,

@@ -12,7 +12,6 @@ import { PageHeader } from "@/components/page-header";
 import { DeleteConfirmModal } from "@/components/delete-confirm-modal";
 import { toast } from "sonner";
 import { useEffect } from "react";
-import { createSupabaseBrowserClient } from "@/lib/supabase/client";
 
 export type LinkItem = { id: string; url: string; likesCount: number };
 
@@ -61,23 +60,30 @@ export function LinksManager({
   }, [links]);
 
   useEffect(() => {
-    const supabase = createSupabaseBrowserClient();
-    const channel = supabase.channel('realtime_links_manager')
-      .on('postgres_changes', {
-        event: 'UPDATE',
-        schema: 'public',
-        table: 'links',
-        filter: `user_id=eq.${userId}`,
-      }, (payload) => {
-        const updatedLink = payload.new as any;
-        setLocalLinks((prev) =>
-          prev.map(link => link.id === updatedLink.id ? { ...link, likesCount: updatedLink.likes_count } : link)
-        );
-      })
-      .subscribe();
+    const es = new EventSource("/api/realtime");
+    es.onmessage = (event) => {
+      try {
+        const payload = JSON.parse(event.data) as { t?: string };
+        if (payload.t !== "links") return;
+      } catch {
+        return;
+      }
+      // One of this user's links gained a like elsewhere — refresh the
+      // id → likesCount map in place (never clobber the whole list).
+      void import("@/app/actions/links").then(({ getMyLinkCounts }) =>
+        getMyLinkCounts().then((counts) => {
+          setLocalLinks((prev) =>
+            prev.map((link) => {
+              const found = counts.find((c) => c.id === link.id);
+              return found ? { ...link, likesCount: found.likesCount } : link;
+            })
+          );
+        }),
+      );
+    };
 
     return () => {
-      supabase.removeChannel(channel);
+      es.close();
     };
   }, [userId]);
 

@@ -1,5 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
-import { createServerClient } from "@supabase/ssr";
+import { jwtVerify, SignJWT } from "jose";
 import {
   AUTH_PATHS,
   USER_PATHS,
@@ -7,28 +7,34 @@ import {
   SUPER_ADMIN_PATHS,
   ROLE_HOME,
 } from "@/lib/routes";
-import { getSessionFromCookie, type SessionClaims } from "@/lib/session-cookie";
+import {
+  SESSION_COOKIE_NAME,
+  sessionCookieOptions,
+  type SessionClaims,
+} from "@/lib/session-cookie";
+import { getJwtSecret } from "@/lib/jwt-secret";
 
 /**
  * Edge middleware.
  *
  * Two responsibilities:
- *   1. Refresh the Supabase auth session on every matched request so that
- *      access tokens are kept fresh (replaces the old sliding JWT cookie).
- *   2. Enforce the application's route guards (auth pages, role/status-based
- *      access) using the `role` + `status` claims mirrored into the user's
- *      JWT by the DB trigger.
+ *   1. Verify the `sd_session` JWT (jose, WebCrypto — edge-safe, zero
+ *      network) and slide its expiry when more than half has elapsed.
+ *   2. Enforce route guards (auth pages, role/status access) from the JWT
+ *      claims, same as before — claims can be ~60s stale after an admin
+ *      changes role/status; the real authorization boundary is
+ *      getCurrentUser() (src/lib/auth.ts), which re-reads the DB.
  *
- * Everything here runs on the Edge runtime, so only the `@supabase/ssr`
- * cookie client is used (no Node APIs, no service-role key).
+ * No DB/Redis here on purpose: Edge runtime has no TCP sockets for
+ * mysql2/ioredis, and the JWT-only fast path is what keeps auth-page loads
+ * zero-network.
  */
 
-const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL!;
-const SUPABASE_ANON_KEY = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY!;
+const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60;
 
 export async function middleware(request: NextRequest) {
-  // Preserve the reverse-proxy header injection that the previous middleware
-  // performed — Cloudflare in front of the app relies on these.
+  // Preserve the reverse-proxy header injection (Cloudflare in front relies
+  // on these).
   const requestHeaders = new Headers(request.headers);
   if (!requestHeaders.has("x-forwarded-proto")) {
     requestHeaders.set("x-forwarded-proto", "https");
@@ -39,25 +45,15 @@ export async function middleware(request: NextRequest) {
   }
 
   const response = NextResponse.next({
-    request: {
-      headers: requestHeaders,
-    },
+    request: { headers: requestHeaders },
   });
 
   // ── Ad-network-friendly security headers ────────────────────────────
-  // "origin" tells the browser to send just the origin (not the full path)
-  // as the Referer header when loading cross-origin resources like ad
-  // iframes. This is the right balance — ad networks can verify the
-  // publisher domain without leaking internal page paths.
   response.headers.set("Referrer-Policy", "origin");
-
-  // ── Security headers (defense-in-depth) ──────────────────────────────
   response.headers.set("X-Content-Type-Options", "nosniff");
   response.headers.set("X-Frame-Options", "SAMEORIGIN");
   response.headers.set("Strict-Transport-Security", "max-age=63072000; includeSubDomains; preload");
   response.headers.set("X-XSS-Protection", "0");
-  // Permissions-Policy: restrict sensitive browser features by default.
-  // The embed-frame proxy overrides this for ad iframes specifically.
   response.headers.set("Permissions-Policy",
     "camera=(), microphone=(), geolocation=(), interest-cohort=()");
 
@@ -68,69 +64,38 @@ export async function middleware(request: NextRequest) {
       p === "/" ? pathname === "/" : pathname === p || pathname.startsWith(p + "/"),
   );
 
-  // ── Session extraction ─────────────────────────────────────────────
-  // For auth pages (login, signup, etc.) we only need to know if the user
-  // is already signed in — a zero-network JWT decode from the cookie is
-  // instant and sufficient. Avoiding the full `getSession()` (which may
-  // trigger a network call to Supabase Auth) saves up to 800ms on login
-  // page loads — the primary entry point for mobile WebView users.
-  //
-  // For protected pages we still do the full session refresh (with the
-  // 800ms timeout safety net) so expired tokens get renewed.
+  // ── Session extraction (zero-network JWT verify) ────────────────────
+  const token = request.cookies.get(SESSION_COOKIE_NAME)?.value ?? null;
   let session: SessionClaims | null = null;
 
-  if (isAuthPath) {
-    // Fast path: instant cookie decode, no Supabase network call.
-    session = getSessionFromCookie(request.cookies.getAll());
-  } else if (isProtected) {
-    const supabase = createServerClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-      // Keep in sync with `createSupabaseServerClient()`
-      // (@/lib/supabase/server.ts).
-      cookieOptions: {
-        httpOnly: true,
-        secure: true,
-        sameSite: "lax",
-      },
-      cookies: {
-        getAll() {
-          return request.cookies.getAll();
-        },
-        setAll(cookiesToSet) {
-          cookiesToSet.forEach(({ name, value, options }) =>
-            response.cookies.set(name, value, options),
-          );
-        },
-      },
-    });
-
-    const cookieCount = request.cookies.getAll().length;
-    const hasAuthCookies = request.cookies.getAll().some((c) => c.name.startsWith("sb-"));
-
+  if (token) {
     try {
-      const { data: { session: supabaseSession } } = await Promise.race([
-        supabase.auth.getSession(),
-        new Promise<never>((_, reject) =>
-          setTimeout(() => reject(new Error("getSession timeout")), 800),
-        ),
-      ]);
-      const user = supabaseSession?.user ?? null;
-      if (user) {
-        const role = (user.user_metadata?.role as string | undefined) ?? null;
-        const status = (user.user_metadata?.status as string | undefined) ?? null;
-        session = { sub: user.id, role: role ?? "user", status: status ?? "pending" };
-        console.log("[MIDDLEWARE] getSession success — user:", user.id.slice(0, 8), "role:", role, "status:", status, "path:", pathname);
-      } else {
-        console.log("[MIDDLEWARE] getSession returned null session — cookies:", cookieCount, "hasAuthCookies:", hasAuthCookies, "path:", pathname);
+      const { payload } = await jwtVerify(token, getJwtSecret(), { algorithms: ["HS256"] });
+      if (typeof payload.sub === "string") {
+        session = {
+          sub: payload.sub,
+          role: (payload.role as SessionClaims["role"]) ?? "user",
+          status: (payload.status as SessionClaims["status"]) ?? "pending",
+        };
+
+        // Sliding refresh: re-issue when more than half of the TTL elapsed.
+        if (payload.exp && payload.iat) {
+          const remaining = payload.exp - Math.floor(Date.now() / 1000);
+          const total = payload.exp - payload.iat;
+          if (remaining > 0 && total > 0 && remaining < total / 2) {
+            const fresh = await reissueToken(token, session);
+            if (fresh) {
+              response.cookies.set(
+                SESSION_COOKIE_NAME,
+                fresh,
+                sessionCookieOptions(),
+              );
+            }
+          }
+        }
       }
     } catch {
-      // getSession() timed out — fall back to direct JWT decode.
-      console.log("[MIDDLEWARE] getSession timeout — falling back to cookie decode. cookies:", cookieCount, "hasAuthCookies:", hasAuthCookies, "path:", pathname);
-      session = getSessionFromCookie(request.cookies.getAll());
-      if (session) {
-        console.log("[MIDDLEWARE] Cookie decode fallback success — user:", session.sub.slice(0, 8), "role:", session.role);
-      } else {
-        console.log("[MIDDLEWARE] Cookie decode fallback returned null — no session");
-      }
+      session = null; // invalid/expired token — treated as logged out
     }
   }
 
@@ -198,6 +163,23 @@ export async function middleware(request: NextRequest) {
   }
 
   return response;
+}
+
+/** Re-signs a still-valid session with a fresh expiry (sliding refresh). */
+async function reissueToken(
+  _oldToken: string,
+  claims: SessionClaims,
+): Promise<string | null> {
+  try {
+    return new SignJWT({ role: claims.role, status: claims.status } as Record<string, unknown>)
+      .setProtectedHeader({ alg: "HS256" })
+      .setSubject(claims.sub)
+      .setIssuedAt()
+      .setExpirationTime(`${SESSION_TTL_SECONDS}s`)
+      .sign(getJwtSecret());
+  } catch {
+    return null;
+  }
 }
 
 export const config = {

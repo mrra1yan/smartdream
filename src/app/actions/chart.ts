@@ -1,7 +1,7 @@
 "use server";
 
-import { supabase } from "@/lib/supabase";
 import { getCurrentUser } from "@/lib/auth";
+import { getLikesInRange } from "@/lib/repos/likes";
 import { toBangladeshLocal, bangladeshDateKey, fromBangladeshLocalISO } from "@/lib/timezone";
 
 export async function getWeeklyLikeStats(userId: string) {
@@ -19,10 +19,7 @@ export async function getWeeklyLikeStats(userId: string) {
   const effectiveUserId = user.id;
 
   // Week/day boundaries computed on the Bangladesh wall clock, not
-  // server-local (UTC) time -- see src/lib/timezone.ts. Otherwise a like
-  // given between midnight and 6am Dhaka time lands one calendar day (and
-  // potentially one Mon-Sun week bucket) earlier than a Bangladeshi user
-  // would expect.
+  // server-local (UTC) time -- see src/lib/timezone.ts.
   const now = toBangladeshLocal();
 
   const day = now.getUTCDay() || 7;
@@ -38,28 +35,19 @@ export async function getWeeklyLikeStats(userId: string) {
   endDate.setUTCHours(23, 59, 59, 999);
 
   // Convert the BD-local boundary instants back to real UTC instants for the
-  // DB query (created_at is stored as a real timestamptz).
+  // DB query (created_at is stored as UTC DATETIME).
   const startDateStr = fromBangladeshLocalISO(startDate);
   const endDateStr = fromBangladeshLocalISO(endDate);
 
-  const { data: userLikes, error } = await supabase
-    .from("likes")
-    // Only 3 columns are ever read (liker_id vs userId, receiver_id vs userId,
-    // created_at for day bucketing). The other 4 columns (id, link_id,
-    // is_anonymous, is_boosted_like) were pulled over the wire but never used.
-    .select("liker_id, receiver_id, created_at")
-    .gte("created_at", startDateStr)
-    .lte("created_at", endDateStr)
-    .or(`liker_id.eq.${effectiveUserId},receiver_id.eq.${effectiveUserId}`);
-
-  if (error || !userLikes) {
+  let userLikes: { liker_id: string | null; receiver_id: string; created_at: string }[];
+  try {
+    userLikes = await getLikesInRange(effectiveUserId, startDateStr, endDateStr);
+  } catch (err) {
+    console.error("getWeeklyLikeStats query error:", err);
     return {
       startDate: startDateStr,
       endDate: endDateStr,
       stats: [
-        // startDate's UTC fields already hold BD-local wall-clock values
-        // (see toBangladeshLocal), so reading its date portion directly
-        // gives the correct BD-local calendar day -- no further shift.
         { name: "Mon", date: startDate.toISOString().split("T")[0], given: 0, taken: 0 },
         { name: "Tue", date: "", given: 0, taken: 0 },
         { name: "Wed", date: "", given: 0, taken: 0 },
@@ -87,10 +75,8 @@ export async function getWeeklyLikeStats(userId: string) {
   });
 
   for (const like of userLikes) {
-    // like.created_at is a real UTC instant -- bangladeshDateKey converts it
-    // to the BD-local calendar day, matching the `stats[].date` labels above
-    // (which are already BD-local). Comparing raw `created_at.split("T")[0]`
-    // against those would misbucket anything within 6h of UTC midnight.
+    // like.created_at is a real UTC instant — bangladeshDateKey converts it
+    // to the BD-local calendar day, matching the stats[].date labels.
     const likeDateStr = bangladeshDateKey(like.created_at);
     const statItem = stats.find(s => s.date === likeDateStr);
 

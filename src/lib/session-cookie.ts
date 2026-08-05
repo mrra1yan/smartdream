@@ -1,65 +1,75 @@
 /**
- * Fast, zero-network session extraction from Supabase auth cookies.
+ * Session JWT (HS256, jose) — replaces Supabase Auth sessions and the
+ * `sb-*-auth-token` cookie pair with a single `sd_session` cookie.
  *
- * Decodes the JWT payload directly — no token refresh, no HTTP calls.
- * Used both in middleware (route guards) and server components (session lookup)
- * to eliminate redundant network round-trips to Supabase Auth.
+ * Claims: sub (user id), role, status, iat, exp, jti. The middleware reads
+ * role/status straight from the JWT (zero-network route guards); the real
+ * authorization boundary is `getCurrentUser()` (src/lib/auth.ts), which
+ * re-reads the profile row through a 60s Redis cache — so an admin's
+ * role/status change converges within a minute, same trust model as before.
  *
- * The role/status claims in an expired JWT are still valid for route-guard /
- * session-lookup decisions — only the *signature* is stale, which this
- * function never verifies anyway. The real auth boundary is RLS + the profile
- * DB query in getCurrentUser().
- *
- * Works with:
- *   - Middleware:     getSessionFromCookie(request.cookies.getAll())
- *   - Server components / route handlers:  getSessionFromCookie((await cookies()).getAll())
+ * Works on both the Edge runtime (middleware — jose uses WebCrypto) and the
+ * Node runtime (server actions/components).
  */
+
+import { SignJWT, jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/jwt-secret";
 
 export type SessionClaims = {
   sub: string;
-  role: string;
-  status: string;
+  role: "user" | "admin" | "super_admin";
+  status: "pending" | "approved" | "rejected";
 };
 
-export function getSessionFromCookie(
-  cookies: { name: string; value: string }[],
-): SessionClaims | null {
-  // @supabase/ssr stores the session in chunked cookies:
-  //   sb-<ref>-auth-token.0, sb-<ref>-auth-token.1, ...
-  // or a single sb-<ref>-auth-token for small payloads.
-  const authCookies = cookies
-    .filter((c) => c.name.match(/^sb-.*-auth-token/))
-    .sort((a, b) => a.name.localeCompare(b.name));
+export const SESSION_COOKIE_NAME = process.env.SESSION_COOKIE_NAME ?? "sd_session";
 
-  if (authCookies.length === 0) return null;
+const SESSION_TTL_SECONDS = 7 * 24 * 60 * 60; // 7 days, sliding refresh in middleware
 
-  const fullValue = authCookies.map((c) => c.value).join("");
+export function sessionCookieOptions(maxAge = SESSION_TTL_SECONDS) {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax" as const,
+    path: "/",
+    maxAge,
+  };
+}
 
+export async function signSession(claims: SessionClaims): Promise<string> {
+  return new SignJWT({ role: claims.role, status: claims.status } as Record<string, unknown>)
+    .setProtectedHeader({ alg: "HS256" })
+    .setSubject(claims.sub)
+    .setIssuedAt()
+    .setExpirationTime(`${SESSION_TTL_SECONDS}s`)
+    .sign(getJwtSecret());
+}
+
+/** Verifies a session token. Returns claims or null (expired/invalid). */
+export async function verifySessionToken(
+  token: string | undefined | null,
+): Promise<SessionClaims | null> {
+  if (!token) return null;
   try {
-    const session = JSON.parse(fullValue);
-    const accessToken: string | undefined = session?.access_token;
-    if (!accessToken) return null;
-
-    // Decode the JWT payload (base64url → JSON). No signature verification
-    // needed — see docstring above.
-    const parts = accessToken.split(".");
-    if (parts.length !== 3) return null;
-
-    const base64 = parts[1].replace(/-/g, "+").replace(/_/g, "/");
-    const padded = base64.padEnd(
-      base64.length + ((4 - (base64.length % 4)) % 4),
-      "=",
-    );
-    const payload = JSON.parse(atob(padded));
-
-    const sub: string | undefined = payload.sub;
-    if (!sub) return null;
-
-    const role = (payload.user_metadata?.role as string) ?? "user";
-    const status = (payload.user_metadata?.status as string) ?? "pending";
-
-    return { sub, role, status };
+    const { payload } = await jwtVerify(token, getJwtSecret(), { algorithms: ["HS256"] });
+    if (typeof payload.sub !== "string") return null;
+    const role = (payload.role as SessionClaims["role"]) ?? "user";
+    const status = (payload.status as SessionClaims["status"]) ?? "pending";
+    return { sub: payload.sub, role, status };
   } catch {
     return null;
   }
+}
+
+/**
+ * Zero-network session extraction from the request cookies (fast path for
+ * middleware route guards and server-side getSession()). Async now — the JWT
+ * signature is actually verified (jose WebCrypto), unlike the old
+ * unverified-payload decode.
+ */
+export async function getSessionFromCookie(
+  cookies: { name: string; value: string }[],
+): Promise<SessionClaims | null> {
+  const authCookie = cookies.find((c) => c.name === SESSION_COOKIE_NAME);
+  if (!authCookie?.value) return null;
+  return verifySessionToken(authCookie.value);
 }

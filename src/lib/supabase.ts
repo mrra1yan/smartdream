@@ -1,31 +1,11 @@
 /**
- * Row types for the application tables in Supabase Postgres.
+ * Row types for the application tables in MySQL.
  *
- * NOTE on clients: historically this module also created the single shared
- * Supabase client. Auth has since moved to Supabase Auth (`@supabase/ssr`),
- * so there are now three client entry points:
- *
- *   - `@/lib/supabase/server`  → `createSupabaseServerClient()` — user-scoped,
- *                                RLS-aware, for server components/actions/routes.
- *   - `@/lib/supabase/client`  → `createSupabaseBrowserClient()` — for client
- *                                components.
- *   - `@/lib/supabase/admin`   → `supabaseAdmin` — service-role, RLS bypass,
- *                                `"server-only"`.
- *
- * For backward compatibility the privileged `supabase` client (service role)
- * is still re-exported from here so existing server-side call-sites keep
- * working. Prefer the explicit imports above for new code.
+ * Column names are snake_case, matching the database, so repository rows
+ * (src/lib/repos/*) map 1:1 onto these types. The old Supabase clients
+ * (server/admin/browser) are gone — every query now goes through the repo
+ * layer over mysql2.
  */
-
-export { supabaseAdmin } from "@/lib/supabase/admin";
-
-import { supabaseAdmin } from "@/lib/supabase/admin";
-
-/**
- * Backward-compatible privileged client (service role, RLS bypass).
- * Server-only — never import from a Client Component.
- */
-export const supabase = supabaseAdmin;
 
 export type Profile = {
   id: string;
@@ -34,11 +14,6 @@ export type Profile = {
   last_name: string;
   phone: string;
   email: string;
-  /**
-   * @deprecated Passwords are now owned by Supabase Auth (`auth.users`).
-   * Kept on the row type only so legacy references compile; the column is
-   * dropped by the migration and should not be read or written.
-   */
   password_hash?: string;
   role: "user" | "admin" | "super_admin";
   status: "pending" | "approved" | "rejected";

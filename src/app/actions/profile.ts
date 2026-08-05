@@ -2,9 +2,14 @@
 
 import { z } from "zod";
 import { revalidatePath } from "next/cache";
-import { supabase } from "@/lib/supabase";
-import { createSupabaseServerClient } from "@/lib/supabase/server";
+import bcrypt from "bcryptjs";
 import { getCurrentUser } from "@/lib/auth";
+import {
+  findProfileByPhone,
+  getProfile,
+  updateProfile as repoUpdateProfile,
+} from "@/lib/repos/profiles";
+import { invalidateProfileCache, invalidateProfileLookups } from "@/lib/profile-cache";
 
 export type ProfileFormState =
   | {
@@ -38,37 +43,31 @@ export async function updateProfile(_state: ProfileFormState, formData: FormData
     return { errors: parsed.error.flatten().fieldErrors };
   }
 
-  // Fast, friendly early-exit for the common case. Not the authoritative
-  // guard on its own — two concurrent updates with the same phone could both
-  // pass this check before either UPDATE commits. The partial unique index
-  // on profiles.phone (supabase/migrations/0006_low_severity_races.sql) is
-  // what actually closes that race; a duplicate that slips past this check
-  // fails the update below with a real unique-violation, caught next.
-  const { data: existingPhone } = await supabase
-    .from("profiles")
-    .select("id")
-    .eq("phone", parsed.data.phone)
-    .single();
-
+  // Friendly early-exit for the common case; the unique index on the phone
+  // generated column (profiles.phone_key) is the authoritative guard — a
+  // concurrent duplicate fails the UPDATE below with ER_DUP_ENTRY (1062).
+  const existingPhone = await findProfileByPhone(parsed.data.phone);
   if (existingPhone && existingPhone.id !== user.id) {
     return { errors: { phone: ["Phone number already in use."] } };
   }
 
-  const { error } = await supabase
-    .from("profiles")
-    .update({
+  try {
+    await repoUpdateProfile(user.id, {
       first_name: parsed.data.firstName,
       last_name: parsed.data.lastName,
       phone: parsed.data.phone,
-    })
-    .eq("id", user.id);
-
-  if (error) {
-    if (error.code === "23505") {
+    });
+  } catch (err) {
+    if ((err as { errno?: number })?.errno === 1062) {
       return { errors: { phone: ["Phone number already in use."] } };
     }
+    console.error("updateProfile error:", err);
     return { message: "Failed to update profile" };
   }
+
+  // Invalidate the 60s profile cache + login lookups (old phone → this user).
+  await invalidateProfileCache(user.id);
+  await invalidateProfileLookups([user.phone, parsed.data.phone]);
 
   revalidatePath("/profile");
   return { ok: true };
@@ -116,27 +115,17 @@ export async function changePassword(_state: PasswordFormState, formData: FormDa
     return { errors: parsed.error.flatten().fieldErrors };
   }
 
-  // Verify the current password by re-authenticating against Supabase Auth.
-  // This preserves the original UX where the user must prove they know their
-  // current password before changing it.
-  const adminClient = await createSupabaseServerClient();
-  const { error: verifyError } = await adminClient.auth.signInWithPassword({
-    email: user.email,
-    password: parsed.data.currentPassword,
-  });
-
-  if (verifyError) {
+  // Re-authenticate against the stored bcrypt hash (was signInWithPassword).
+  const profile = await getProfile(user.id);
+  if (!profile?.password_hash || !(await bcrypt.compare(parsed.data.currentPassword, profile.password_hash))) {
     return { errors: { currentPassword: ["Incorrect current password."] } };
   }
 
-  // Update the password on the signed-in user's session.
-  const { error } = await adminClient.auth.updateUser({
-    password: parsed.data.newPassword,
-  });
+  const newHash = await bcrypt.hash(parsed.data.newPassword, 10);
+  await repoUpdateProfile(user.id, { password_hash: newHash });
 
-  if (error) {
-    return { message: "Failed to change password" };
-  }
+  // Force the cached profile row to refresh so the UI reflects the change.
+  await invalidateProfileCache(user.id);
 
   return { ok: true };
 }

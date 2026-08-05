@@ -1,12 +1,9 @@
 import "server-only";
 import { randomUUID } from "crypto";
 import { SignJWT, jwtVerify } from "jose";
+import { getJwtSecret } from "@/lib/jwt-secret";
 
-if (process.env.NODE_ENV === "production" && !process.env.JWT_SECRET) {
-  throw new Error("Missing JWT_SECRET environment variable in production.");
-}
-
-const SECRET = new TextEncoder().encode(process.env.JWT_SECRET ?? "dev-secret-change-me");
+const SECRET = getJwtSecret();
 const TOKEN_TTL = "10m";
 const TOKEN_TTL_MS = 10 * 60 * 1000;
 

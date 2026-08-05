@@ -2,10 +2,10 @@
 
 import { revalidatePath } from "next/cache";
 import { z } from "zod";
-import { supabase } from "@/lib/supabase";
 import { requireStaff } from "@/lib/auth";
 import { logAudit } from "@/lib/audit";
 import { invalidateSettingsCache } from "@/lib/settings";
+import { updateSettingsRow } from "@/lib/repos/settings";
 
 const nullableNumber = z.preprocess(
   (val) => (val === "" || val === null || val === undefined ? null : val),
@@ -70,10 +70,8 @@ export async function updateSettings(
   });
   if (!parsed.success) return { error: parsed.error.issues[0].message };
 
-  const now = new Date().toISOString();
-  const { error } = await supabase
-    .from("settings")
-    .update({
+  try {
+    await updateSettingsRow({
       whatsapp_number: parsed.data.whatsappNumber,
       active_like_count: parsed.data.activeLikeCount,
       active_window_hours: parsed.data.activeWindowHours,
@@ -94,16 +92,14 @@ export async function updateSettings(
       autolike_price_6m: parsed.data.autolikePrice6m,
       autolike_price_1y: parsed.data.autolikePrice1y,
       autolike_price_usage_per_unit: parsed.data.autolikePriceUsagePerUnit,
-      updated_at: now,
-    })
-    .eq("id", "1");
-
-  if (error) {
+    });
+  } catch (err) {
+    console.error("updateSettings error:", err);
     return { error: "Failed to update settings" };
   }
 
   await logAudit(me, "update_settings", null);
-  invalidateSettingsCache();
+  await invalidateSettingsCache();
 
   revalidatePath("/admin/settings");
   revalidatePath("/");
