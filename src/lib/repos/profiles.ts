@@ -3,10 +3,8 @@ import { pool, toIso } from "@/lib/db";
 import { cacheGet, cacheSet } from "@/lib/redis";
 
 /**
- * profiles table repository. All functions return rows shaped exactly like
- * the old supabase-js `Profile` type (snake_case columns, ISO timestamps,
- * booleans as real booleans) so existing mappers (profileRowToAdmin,
- * getCurrentUser) work unchanged.
+ * profiles table repository. Returns rows shaped exactly like the Profile type
+ * (snake_case columns, ISO timestamps, real booleans from PostgreSQL).
  */
 
 const COLS = `
@@ -62,20 +60,20 @@ export function mapProfileRow(row: Record<string, unknown>): ProfileRow {
     password_hash: (row.password_hash as string | null) ?? null,
     role: String(row.role ?? "user"),
     status: String(row.status ?? "pending"),
-    is_elite: Boolean(row.is_elite),
-    is_boosted: Boolean(row.is_boosted),
+    is_elite: row.is_elite as boolean,
+    is_boosted: row.is_boosted as boolean,
     boost_order: row.boost_order == null ? null : Number(row.boost_order),
     boost_model: String(row.boost_model ?? "none"),
     boost_expiry: toIso(row.boost_expiry),
     boost_quota: row.boost_quota == null ? null : Number(row.boost_quota),
     boost_used: Number(row.boost_used ?? 0),
-    auto_like_enabled: Boolean(row.auto_like_enabled),
+    auto_like_enabled: row.auto_like_enabled as boolean,
     auto_like_model: String(row.auto_like_model ?? "none"),
     auto_like_expiry: toIso(row.auto_like_expiry),
     auto_like_quota: row.auto_like_quota == null ? null : Number(row.auto_like_quota),
     auto_like_used: Number(row.auto_like_used ?? 0),
     free_autolike_until: toIso(row.free_autolike_until),
-    auto_like_paused: Boolean(row.auto_like_paused),
+    auto_like_paused: row.auto_like_paused as boolean,
     auto_like_paused_remaining_minutes:
       row.auto_like_paused_remaining_minutes == null ? null : Number(row.auto_like_paused_remaining_minutes),
     free_autolike_paused_remaining_minutes:
@@ -88,42 +86,34 @@ export function mapProfileRow(row: Record<string, unknown>): ProfileRow {
 }
 
 export async function getProfile(id: string): Promise<ProfileRow | null> {
-  const [rows] = await pool.query(`SELECT ${COLS} FROM profiles WHERE id = ?`, [id]);
-  const row = (rows as Record<string, unknown>[])[0];
-  return row ? mapProfileRow(row) : null;
+  const { rows } = await pool.query(`SELECT ${COLS} FROM profiles WHERE id = $1`, [id]);
+  return rows[0] ? mapProfileRow(rows[0]) : null;
 }
 
 export async function findProfileByEmail(email: string): Promise<ProfileRow | null> {
   return cachedLookup(`profile:email:${email.toLowerCase()}`, async () => {
-    const [rows] = await pool.query(`SELECT ${COLS} FROM profiles WHERE email = ? LIMIT 1`, [email]);
-    const row = (rows as Record<string, unknown>[])[0];
-    return row ? mapProfileRow(row) : null;
+    const { rows } = await pool.query(`SELECT ${COLS} FROM profiles WHERE email = $1 LIMIT 1`, [email]);
+    return rows[0] ? mapProfileRow(rows[0]) : null;
   });
 }
 
 export async function findProfileByPhone(phone: string): Promise<ProfileRow | null> {
   return cachedLookup(`profile:phone:${phone}`, async () => {
-    const [rows] = await pool.query(`SELECT ${COLS} FROM profiles WHERE phone = ? LIMIT 1`, [phone]);
-    const row = (rows as Record<string, unknown>[])[0];
-    return row ? mapProfileRow(row) : null;
+    const { rows } = await pool.query(`SELECT ${COLS} FROM profiles WHERE phone = $1 LIMIT 1`, [phone]);
+    return rows[0] ? mapProfileRow(rows[0]) : null;
   });
 }
 
 export async function findProfileByPublicId(publicId: string): Promise<ProfileRow | null> {
   return cachedLookup(`profile:pub:${publicId}`, async () => {
-    const [rows] = await pool.query(`SELECT ${COLS} FROM profiles WHERE public_id = ? LIMIT 1`, [publicId]);
-    const row = (rows as Record<string, unknown>[])[0];
-    return row ? mapProfileRow(row) : null;
+    const { rows } = await pool.query(`SELECT ${COLS} FROM profiles WHERE public_id = $1 LIMIT 1`, [publicId]);
+    return rows[0] ? mapProfileRow(rows[0]) : null;
   });
 }
 
 /**
- * Cache-aside for the login/signup identifier lookups (email/phone/public_id
- * → profile row). 300s TTL; misses are NOT cached (a brand-new account must
- * be visible immediately after signup). Invalidated via
- * invalidateProfileLookups() (src/lib/profile-cache.ts) when those fields
- * change — currently only profile.phone can change post-signup, so phone
- * invalidation covers the writes that exist.
+ * Cache-aside for login/signup identifier lookups. 300s TTL; misses not
+ * cached. Invalidated via invalidateProfileLookups() when fields change.
  */
 const LOOKUP_CACHE_TTL_SECONDS = 300;
 
@@ -138,8 +128,7 @@ async function cachedLookup<T>(
   return row;
 }
 
-/** Login lookup: email or phone identifier (auth.ts semantics — two separate
- *  parameterized lookups, never an interpolated OR filter). */
+/** Login lookup: email or phone identifier. */
 export async function getLoginProfile(
   identifier: string,
 ): Promise<ProfileRow | null> {
@@ -152,13 +141,12 @@ export async function getLoginProfile(
 export async function getProfileMeta(
   id: string,
 ): Promise<{ is_elite: boolean; role: string } | null> {
-  const [rows] = await pool.query(
-    "SELECT is_elite, role FROM profiles WHERE id = ? LIMIT 1",
+  const { rows } = await pool.query(
+    "SELECT is_elite, role FROM profiles WHERE id = $1 LIMIT 1",
     [id],
   );
-  const row = (rows as Record<string, unknown>[])[0];
-  if (!row) return null;
-  return { is_elite: Boolean(row.is_elite), role: String(row.role) };
+  if (!rows[0]) return null;
+  return { is_elite: rows[0].is_elite as boolean, role: String(rows[0].role) };
 }
 
 export type NewProfile = {
@@ -177,7 +165,7 @@ export type NewProfile = {
 export async function insertProfile(data: NewProfile): Promise<void> {
   await pool.query(
     `INSERT INTO profiles (id, public_id, first_name, last_name, phone, email, password_hash, role, status, referred_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
     [
       data.id,
       data.public_id,
@@ -193,8 +181,7 @@ export async function insertProfile(data: NewProfile): Promise<void> {
   );
 }
 
-/** Whitelisted writable columns — dynamic UPDATE built from a fixed map, so
- *  callers can never inject column names. */
+/** Whitelisted writable columns — dynamic UPDATE built from a fixed map. */
 const WRITABLE_COLS: Record<string, string> = {
   public_id: "public_id",
   first_name: "first_name",
@@ -228,14 +215,12 @@ const WRITABLE_COLS: Record<string, string> = {
 export type ProfilePatch = Partial<Record<keyof typeof WRITABLE_COLS, unknown>>;
 
 export async function updateProfile(id: string, patch: ProfilePatch): Promise<void> {
-  const entries = Object.entries(patch).filter(
-    ([key]) => key in WRITABLE_COLS,
-  );
+  const entries = Object.entries(patch).filter(([key]) => key in WRITABLE_COLS);
   if (entries.length === 0) return;
-  const sets = entries.map(([key]) => `${WRITABLE_COLS[key]} = ?`);
+  const sets = entries.map(([key], i) => `${WRITABLE_COLS[key]} = $${i + 1}`);
   const values = entries.map(([, value]) => value ?? null);
   await pool.query(
-    `UPDATE profiles SET ${sets.join(", ")} WHERE id = ?`,
+    `UPDATE profiles SET ${sets.join(", ")} WHERE id = $${values.length + 1}`,
     [...values, id],
   );
 }
@@ -246,8 +231,8 @@ export type ProfileListFilters = {
   status?: string;
   isElite?: boolean;
   isBoosted?: boolean;
-  search?: string; // LIKE on public_id / email / phone
-  orderBy?: string; // whitelisted: created_at
+  search?: string;
+  orderBy?: string;
   limit?: number;
 };
 
@@ -256,116 +241,114 @@ export async function listProfiles(
 ): Promise<ProfileRow[]> {
   const where: string[] = [];
   const params: unknown[] = [];
+  let p = 1;
 
   if (filters.roleIn) {
-    where.push(`role IN (${filters.roleIn.map(() => "?").join(", ")})`);
-    params.push(...filters.roleIn);
+    where.push(`role = ANY($${p++})`);
+    params.push(filters.roleIn);
   }
   if (filters.roleNotIn) {
-    where.push(`role NOT IN (${filters.roleNotIn.map(() => "?").join(", ")})`);
-    params.push(...filters.roleNotIn);
+    where.push(`role != ALL($${p++})`);
+    params.push(filters.roleNotIn);
   }
   if (filters.status) {
-    where.push("status = ?");
+    where.push(`status = $${p++}`);
     params.push(filters.status);
   }
   if (filters.isElite !== undefined) {
-    where.push("is_elite = ?");
-    params.push(filters.isElite ? 1 : 0);
+    where.push(`is_elite = $${p++}`);
+    params.push(filters.isElite);
   }
   if (filters.isBoosted !== undefined) {
-    where.push("is_boosted = ?");
-    params.push(filters.isBoosted ? 1 : 0);
+    where.push(`is_boosted = $${p++}`);
+    params.push(filters.isBoosted);
   }
   if (filters.search) {
-    where.push("(public_id LIKE ? OR email LIKE ? OR phone LIKE ?)");
-    const term = `%${filters.search}%`;
-    params.push(term, term, term);
+    where.push(`(public_id ILIKE $${p} OR email ILIKE $${p} OR phone ILIKE $${p})`);
+    params.push(`%${filters.search}%`);
+    p++;
   }
 
-  const orderBy = filters.orderBy === "created_at" ? "created_at DESC" : "created_at DESC";
+  const orderBy = "created_at DESC";
   const limitClause = filters.limit ? ` LIMIT ${Math.min(filters.limit, 1000)}` : "";
 
   const sql = `SELECT ${COLS} FROM profiles
     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
     ORDER BY ${orderBy}${limitClause}`;
 
-  const [rows] = await pool.query(sql, params);
-  return (rows as Record<string, unknown>[]).map(mapProfileRow);
+  const { rows } = await pool.query(sql, params);
+  return rows.map(mapProfileRow);
 }
 
 export async function countProfiles(filters: ProfileListFilters = {}): Promise<number> {
   const where: string[] = [];
   const params: unknown[] = [];
+  let p = 1;
 
   if (filters.roleIn) {
-    where.push(`role IN (${filters.roleIn.map(() => "?").join(", ")})`);
-    params.push(...filters.roleIn);
+    where.push(`role = ANY($${p++})`);
+    params.push(filters.roleIn);
   }
   if (filters.roleNotIn) {
-    where.push(`role NOT IN (${filters.roleNotIn.map(() => "?").join(", ")})`);
-    params.push(...filters.roleNotIn);
+    where.push(`role != ALL($${p++})`);
+    params.push(filters.roleNotIn);
   }
   if (filters.status) {
-    where.push("status = ?");
+    where.push(`status = $${p++}`);
     params.push(filters.status);
   }
   if (filters.isElite !== undefined) {
-    where.push("is_elite = ?");
-    params.push(filters.isElite ? 1 : 0);
+    where.push(`is_elite = $${p++}`);
+    params.push(filters.isElite);
   }
 
   const sql = `SELECT COUNT(*) AS cnt FROM profiles
     ${where.length ? `WHERE ${where.join(" AND ")}` : ""}`;
-  const [rows] = await pool.query(sql, params);
-  return Number((rows as Record<string, unknown>[])[0]?.cnt ?? 0);
+  const { rows } = await pool.query(sql, params);
+  return Number(rows[0]?.cnt ?? 0);
 }
 
 export async function countProfilesByReferredBy(userId: string): Promise<number> {
-  const [rows] = await pool.query(
-    "SELECT COUNT(*) AS cnt FROM profiles WHERE referred_by = ?",
+  const { rows } = await pool.query(
+    "SELECT COUNT(*) AS cnt FROM profiles WHERE referred_by = $1",
     [userId],
   );
-  return Number((rows as Record<string, unknown>[])[0]?.cnt ?? 0);
+  return Number(rows[0]?.cnt ?? 0);
 }
 
-/** Profile rows by id list (referral/approver lookups). */
-export async function getProfilesByIds(
-  ids: string[],
-): Promise<ProfileRow[]> {
+/** Profile rows by id list. */
+export async function getProfilesByIds(ids: string[]): Promise<ProfileRow[]> {
   if (ids.length === 0) return [];
-  const [rows] = await pool.query(
-    `SELECT ${COLS} FROM profiles WHERE id IN (${ids.map(() => "?").join(", ")})`,
-    ids,
+  const { rows } = await pool.query(
+    `SELECT ${COLS} FROM profiles WHERE id = ANY($1)`,
+    [ids],
   );
-  return (rows as Record<string, unknown>[]).map(mapProfileRow);
+  return rows.map(mapProfileRow);
 }
 
-/** Highest boost_order among boosted profiles (nextBoostOrder fallback). */
+/** Highest boost_order among boosted profiles. */
 export async function getMaxBoostOrder(): Promise<number | null> {
-  const [rows] = await pool.query(
-    "SELECT MAX(boost_order) AS m FROM profiles WHERE is_boosted = 1",
+  const { rows } = await pool.query(
+    "SELECT MAX(boost_order) AS m FROM profiles WHERE is_boosted = TRUE",
   );
-  const value = (rows as Record<string, unknown>[])[0]?.m;
+  const value = rows[0]?.m;
   return value == null ? null : Number(value);
 }
 
 /**
- * Atomic pending→approved transition (approveUser): flips the row only while
- * status is still 'pending' (closes the double-approve / double-credit race)
- * and returns the affected row's referred_by, or null if no row matched.
+ * Atomic pending→approved transition. Flips only while status = 'pending'
+ * and returns referred_by, or null if no row matched.
  */
 export async function approveProfileAtomic(
   userId: string,
   approvedBy: string | null,
 ): Promise<string | null> {
-  const [result] = await pool.query(
-    `UPDATE profiles SET status = 'approved', approved_by = ?
-     WHERE id = ? AND status = 'pending'`,
+  const { rowCount } = await pool.query(
+    `UPDATE profiles SET status = 'approved', approved_by = $1
+     WHERE id = $2 AND status = 'pending'`,
     [approvedBy, userId],
   );
-  if ((result as { affectedRows: number }).affectedRows === 0) return null;
-
+  if (!rowCount || rowCount === 0) return null;
   const row = await getProfile(userId);
   return row?.referred_by ?? null;
 }
@@ -378,31 +361,32 @@ export async function getProfileBonusFields(
   auto_like_paused: boolean;
   free_autolike_paused_remaining_minutes: number | null;
 } | null> {
-  const [rows] = await pool.query(
+  const { rows } = await pool.query(
     `SELECT free_autolike_until, auto_like_paused, free_autolike_paused_remaining_minutes
-     FROM profiles WHERE id = ? LIMIT 1`,
+     FROM profiles WHERE id = $1 LIMIT 1`,
     [userId],
   );
-  const row = (rows as Record<string, unknown>[])[0];
-  if (!row) return null;
+  if (!rows[0]) return null;
   return {
-    free_autolike_until: toIso(row.free_autolike_until),
-    auto_like_paused: Boolean(row.auto_like_paused),
+    free_autolike_until: toIso(rows[0].free_autolike_until),
+    auto_like_paused: rows[0].auto_like_paused as boolean,
     free_autolike_paused_remaining_minutes:
-      row.free_autolike_paused_remaining_minutes == null ? null : Number(row.free_autolike_paused_remaining_minutes),
+      rows[0].free_autolike_paused_remaining_minutes == null
+        ? null
+        : Number(rows[0].free_autolike_paused_remaining_minutes),
   };
 }
 
 /** Hard-delete a profile (rejectUser / deleteUser). Likes/links cascade. */
 export async function deleteProfile(userId: string): Promise<void> {
-  await pool.query("DELETE FROM profiles WHERE id = ?", [userId]);
+  await pool.query("DELETE FROM profiles WHERE id = $1", [userId]);
 }
 
-/** Null out references to a deleted user (reject cleanup). */
+/** Null out references to a deleted user. */
 export async function nullOutReferredBy(userId: string): Promise<void> {
-  await pool.query("UPDATE profiles SET referred_by = NULL WHERE referred_by = ?", [userId]);
+  await pool.query("UPDATE profiles SET referred_by = NULL WHERE referred_by = $1", [userId]);
 }
 
 export async function nullOutApprovedBy(userId: string): Promise<void> {
-  await pool.query("UPDATE profiles SET approved_by = NULL WHERE approved_by = ?", [userId]);
+  await pool.query("UPDATE profiles SET approved_by = NULL WHERE approved_by = $1", [userId]);
 }

@@ -1,7 +1,7 @@
 import "server-only";
 import { pool, toIso } from "@/lib/db";
 
-/** links table repository. Rows match the old supabase `Link` shape. */
+/** links table repository. */
 
 export type LinkRow = {
   id: string;
@@ -24,44 +24,42 @@ export function mapLinkRow(row: Record<string, unknown>): LinkRow {
 }
 
 export async function getLinkById(id: string): Promise<LinkRow | null> {
-  const [rows] = await pool.query(
-    "SELECT id, user_id, url, likes_count, sort_order, created_at FROM links WHERE id = ? LIMIT 1",
+  const { rows } = await pool.query(
+    "SELECT id, user_id, url, likes_count, sort_order, created_at FROM links WHERE id = $1 LIMIT 1",
     [id],
   );
-  const row = (rows as Record<string, unknown>[])[0];
-  return row ? mapLinkRow(row) : null;
+  return rows[0] ? mapLinkRow(rows[0]) : null;
 }
 
-/** Link owner + owner's boost/elite flags (commitLikeAction's join). */
+/** Link owner + owner's boost/elite flags (commitLikeAction join). */
 export async function getLinkOwner(
   linkId: string,
 ): Promise<{ user_id: string; is_elite: boolean; is_boosted: boolean } | null> {
-  const [rows] = await pool.query(
+  const { rows } = await pool.query(
     `SELECT l.user_id, p.is_elite, p.is_boosted
      FROM links l
      JOIN profiles p ON p.id = l.user_id
-     WHERE l.id = ? LIMIT 1`,
+     WHERE l.id = $1 LIMIT 1`,
     [linkId],
   );
-  const row = (rows as Record<string, unknown>[])[0];
-  if (!row) return null;
+  if (!rows[0]) return null;
   return {
-    user_id: String(row.user_id),
-    is_elite: Boolean(row.is_elite),
-    is_boosted: Boolean(row.is_boosted),
+    user_id: String(rows[0].user_id),
+    is_elite: rows[0].is_elite as boolean,
+    is_boosted: rows[0].is_boosted as boolean,
   };
 }
 
 export async function getUserLinks(
   userId: string,
 ): Promise<{ id: string; url: string | null; likes_count: number }[]> {
-  const [rows] = await pool.query(
+  const { rows } = await pool.query(
     `SELECT id, url, likes_count FROM links
-     WHERE user_id = ? AND sort_order >= 0
+     WHERE user_id = $1 AND sort_order >= 0
      ORDER BY sort_order ASC`,
     [userId],
   );
-  return (rows as Record<string, unknown>[]).map((r) => ({
+  return rows.map((r) => ({
     id: String(r.id),
     url: (r.url as string | null) ?? null,
     likes_count: Number(r.likes_count ?? 0),
@@ -74,19 +72,19 @@ export async function updateLink(
   url: string,
 ): Promise<void> {
   await pool.query(
-    "UPDATE links SET url = ? WHERE id = ? AND user_id = ?",
+    "UPDATE links SET url = $1 WHERE id = $2 AND user_id = $3",
     [url, id, userId],
   );
 }
 
-/** Soft-delete marker: negative seconds-since-epoch (see actions/links.ts). */
+/** Soft-delete marker: negative seconds-since-epoch. */
 function deletedSortOrder(): number {
   return -Math.floor(Date.now() / 1000);
 }
 
 export async function softDeleteLink(id: string, userId: string): Promise<void> {
   await pool.query(
-    "UPDATE links SET url = 'https://deleted.local', sort_order = ? WHERE id = ? AND user_id = ?",
+    "UPDATE links SET url = 'https://deleted.local', sort_order = $1 WHERE id = $2 AND user_id = $3",
     [deletedSortOrder(), id, userId],
   );
 }
@@ -94,36 +92,35 @@ export async function softDeleteLink(id: string, userId: string): Promise<void> 
 /** Bulk soft-delete; returns how many rows were actually updated. */
 export async function softDeleteLinks(ids: string[], userId: string): Promise<number> {
   if (ids.length === 0) return 0;
-  const [result] = await pool.query(
-    `UPDATE links SET url = 'https://deleted.local', sort_order = ?
-     WHERE user_id = ? AND id IN (${ids.map(() => "?").join(", ")})`,
-    [deletedSortOrder(), userId, ...ids],
+  const { rowCount } = await pool.query(
+    `UPDATE links SET url = 'https://deleted.local', sort_order = $1
+     WHERE user_id = $2 AND id = ANY($3)`,
+    [deletedSortOrder(), userId, ids],
   );
-  return (result as { affectedRows: number }).affectedRows;
+  return rowCount ?? 0;
 }
 
 export async function countActiveLinks(userId: string): Promise<number> {
-  const [rows] = await pool.query(
-    "SELECT COUNT(*) AS cnt FROM links WHERE user_id = ? AND sort_order >= 0",
+  const { rows } = await pool.query(
+    "SELECT COUNT(*) AS cnt FROM links WHERE user_id = $1 AND sort_order >= 0",
     [userId],
   );
-  return Number((rows as Record<string, unknown>[])[0]?.cnt ?? 0);
+  return Number(rows[0]?.cnt ?? 0);
 }
 
-/** Active-link count per user (admin "active users" metric). */
+/** Active-link count across multiple users (admin metric). */
 export async function countLinksByUserIds(userIds: string[]): Promise<number> {
   if (userIds.length === 0) return 0;
-  const [rows] = await pool.query(
-    `SELECT COUNT(*) AS cnt FROM links
-     WHERE sort_order >= 0 AND user_id IN (${userIds.map(() => "?").join(", ")})`,
-    userIds,
+  const { rows } = await pool.query(
+    "SELECT COUNT(*) AS cnt FROM links WHERE sort_order >= 0 AND user_id = ANY($1)",
+    [userIds],
   );
-  return Number((rows as Record<string, unknown>[])[0]?.cnt ?? 0);
+  return Number(rows[0]?.cnt ?? 0);
 }
 
 /** Hard-delete all links for a user (rejectUser cleanup). */
 export async function deleteLinksByUser(userId: string): Promise<void> {
-  await pool.query("DELETE FROM links WHERE user_id = ?", [userId]);
+  await pool.query("DELETE FROM links WHERE user_id = $1", [userId]);
 }
 
 /** Sum of likes_count per user over their active links (elite dashboards). */
@@ -132,13 +129,13 @@ export async function getLikesTotalByUserIds(
 ): Promise<Map<string, number>> {
   const map = new Map<string, number>();
   if (userIds.length === 0) return map;
-  const [rows] = await pool.query(
+  const { rows } = await pool.query(
     `SELECT user_id, SUM(likes_count) AS total FROM links
-     WHERE sort_order >= 0 AND user_id IN (${userIds.map(() => "?").join(", ")})
+     WHERE sort_order >= 0 AND user_id = ANY($1)
      GROUP BY user_id`,
-    userIds,
+    [userIds],
   );
-  for (const r of rows as Record<string, unknown>[]) {
+  for (const r of rows) {
     map.set(String(r.user_id), Number(r.total ?? 0));
   }
   return map;

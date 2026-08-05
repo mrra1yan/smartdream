@@ -12,7 +12,7 @@ export async function insertAuditLog(entry: {
 }): Promise<void> {
   await pool.query(
     `INSERT INTO audit_log (id, actor_id, actor_role, action, target_id, metadata)
-     VALUES (UUID(), ?, ?, ?, ?, ?)`,
+     VALUES (gen_random_uuid(), $1, $2, $3, $4, $5)`,
     [
       entry.actor_id ?? null,
       entry.actor_role ?? null,
@@ -35,16 +35,16 @@ export type AdminAuditEntry = {
 };
 
 export async function listAuditLog(limit = 200): Promise<AdminAuditEntry[]> {
-  const [rows] = await pool.query(
+  const { rows } = await pool.query(
     `SELECT a.id, a.created_at, a.actor_id, a.actor_role, a.action, a.target_id, a.metadata,
             actor.email AS actor_email
      FROM audit_log a
      LEFT JOIN profiles actor ON actor.id = a.actor_id
      ORDER BY a.created_at DESC
-     LIMIT ?`,
+     LIMIT $1`,
     [limit],
   );
-  return (rows as Record<string, unknown>[]).map((r) => ({
+  return rows.map((r) => ({
     id: String(r.id),
     created_at: toIso(r.created_at) ?? "",
     actor_id: (r.actor_id as string | null) ?? null,

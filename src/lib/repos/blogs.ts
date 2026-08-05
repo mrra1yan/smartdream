@@ -42,15 +42,15 @@ export function mapBlogRow(row: Record<string, unknown>): BlogRow {
   };
 }
 
-/** Public published blogs, newest first (blog.ts getBlogs). */
+/** Public published blogs, newest first. */
 export async function listPublishedBlogs(): Promise<BlogRow[]> {
-  const [rows] = await pool.query(
+  const { rows } = await pool.query(
     `SELECT id, title, slug, excerpt, hero_image, published_at
      FROM blogs
-     WHERE published_at IS NOT NULL AND published_at <= NOW(6)
+     WHERE published_at IS NOT NULL AND published_at <= NOW()
      ORDER BY published_at DESC`,
   );
-  return (rows as Record<string, unknown>[]).map((r) => ({
+  return rows.map((r) => ({
     id: String(r.id),
     title: (r.title as string | null) ?? null,
     slug: (r.slug as string | null) ?? null,
@@ -64,27 +64,25 @@ export async function listPublishedBlogs(): Promise<BlogRow[]> {
 }
 
 export async function getBlogBySlug(slug: string): Promise<BlogRow | null> {
-  const [rows] = await pool.query(
-    "SELECT * FROM blogs WHERE slug = ? LIMIT 1",
+  const { rows } = await pool.query(
+    "SELECT * FROM blogs WHERE slug = $1 LIMIT 1",
     [slug],
   );
-  const row = (rows as Record<string, unknown>[])[0];
-  return row ? mapBlogRow(row) : null;
+  return rows[0] ? mapBlogRow(rows[0]) : null;
 }
 
 export async function getBlogById(id: string): Promise<BlogRow | null> {
-  const [rows] = await pool.query(
-    "SELECT * FROM blogs WHERE id = ? LIMIT 1",
+  const { rows } = await pool.query(
+    "SELECT * FROM blogs WHERE id = $1 LIMIT 1",
     [id],
   );
-  const row = (rows as Record<string, unknown>[])[0];
-  return row ? mapBlogRow(row) : null;
+  return rows[0] ? mapBlogRow(rows[0]) : null;
 }
 
 /** All blogs (published + draft), admin management. */
 export async function listAllBlogs(): Promise<BlogRow[]> {
-  const [rows] = await pool.query("SELECT * FROM blogs ORDER BY created_at DESC");
-  return (rows as Record<string, unknown>[]).map(mapBlogRow);
+  const { rows } = await pool.query("SELECT * FROM blogs ORDER BY created_at DESC");
+  return rows.map(mapBlogRow);
 }
 
 export async function insertBlog(data: {
@@ -99,7 +97,7 @@ export async function insertBlog(data: {
 }): Promise<void> {
   await pool.query(
     `INSERT INTO blogs (id, title, slug, excerpt, content, hero_image, published_at, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
     [
       data.id,
       data.title,
@@ -125,22 +123,21 @@ export type BlogPatch = {
 export async function updateBlog(id: string, patch: BlogPatch): Promise<void> {
   const sets: string[] = [];
   const params: unknown[] = [];
+  let p = 1;
   for (const [key, value] of Object.entries(patch)) {
-    sets.push(`${key} = ?`);
+    sets.push(`${key} = $${p++}`);
     params.push(value ?? null);
   }
   if (sets.length === 0) return;
-  await pool.query(`UPDATE blogs SET ${sets.join(", ")} WHERE id = ?`, [
-    ...params,
-    id,
-  ]);
+  params.push(id);
+  await pool.query(`UPDATE blogs SET ${sets.join(", ")} WHERE id = $${p}`, params);
 }
 
 export async function deleteBlog(id: string): Promise<void> {
-  await pool.query("DELETE FROM blogs WHERE id = ?", [id]);
+  await pool.query("DELETE FROM blogs WHERE id = $1", [id]);
 }
 
-/** Nulls out created_by for all blogs written by a deleted user (admin.ts). */
+/** Nulls out created_by for all blogs written by a deleted user. */
 export async function nullOutBlogCreator(userId: string): Promise<void> {
-  await pool.query("UPDATE blogs SET created_by = NULL WHERE created_by = ?", [userId]);
+  await pool.query("UPDATE blogs SET created_by = NULL WHERE created_by = $1", [userId]);
 }

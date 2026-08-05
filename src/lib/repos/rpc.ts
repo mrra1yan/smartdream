@@ -2,8 +2,8 @@ import "server-only";
 import { callOut, callRows } from "@/lib/db";
 
 /**
- * Wrappers for the MySQL stored procedures (db/migrations/0002_rpcs.sql).
- * Every procedure that uses GET_LOCK runs through callOut/callRows, which
+ * Wrappers for PostgreSQL functions (db/setup.sql PL/pgSQL functions).
+ * Functions that use pg_advisory_lock run through callOut/callRows, which
  * hold a single pooled connection so locks can never leak.
  */
 
@@ -21,28 +21,22 @@ export type LikeCommitArgs = {
   todayIso: string;
 };
 
-/** ISO string → Date for DATETIME params (mysql2 binds Date objects
- *  correctly per connection timezone; raw "T"/"Z" strings may not parse). */
-function isoParam(iso: string): Date {
-  return new Date(iso);
-}
-
 /** 1 = committed, 0 = rejected (cooldown / owner deficit / lock failure). */
 export async function processLikeCommit(args: LikeCommitArgs): Promise<boolean> {
   const result = await callOut<number>(
-    "CALL process_like_commit(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, @r)",
+    `SELECT process_like_commit($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) AS result`,
     [
       args.likerId,
       args.linkId,
       args.receiverId,
-      args.isAnon ? 1 : 0,
-      args.isBoostedLike ? 1 : 0,
-      args.offerActive ? 1 : 0,
+      args.isAnon,
+      args.isBoostedLike,
+      args.offerActive,
       args.offerLikesRequired,
       args.offerAutoLikeMinutes,
       args.activeWindowHours,
       args.activeLikeCount,
-      isoParam(args.todayIso),
+      args.todayIso,
     ],
   );
   return result === 1;
@@ -55,14 +49,14 @@ export async function addLinksAtomic(
   maxLinks: number,
 ): Promise<number> {
   return callOut<number>(
-    "CALL add_links_atomic(?, ?, ?, @r)",
+    "SELECT add_links_atomic($1, $2, $3) AS result",
     [userId, JSON.stringify(rows), maxLinks],
   );
 }
 
-/** Next boost_order value (atomic, race-free — mirrors the pg sequence). */
+/** Next boost_order value (atomic, race-free via sequence). */
 export async function nextBoostOrder(): Promise<number> {
-  return callOut<number>("CALL next_boost_order(@r)", []);
+  return callOut<number>("SELECT nextval('boost_order_seq') AS result", []);
 }
 
 export type MyStatsRow = {
@@ -78,8 +72,8 @@ export async function getMyStats(
   minus24hIso: string,
 ): Promise<MyStatsRow | null> {
   const rows = await callRows<Record<string, number>>(
-    "CALL get_my_stats(?, ?, ?)",
-    [viewerId, isoParam(todayIso), isoParam(minus24hIso)],
+    "SELECT * FROM get_my_stats($1, $2, $3)",
+    [viewerId, todayIso, minus24hIso],
   );
   const row = rows[0];
   if (!row) return null;
@@ -108,7 +102,7 @@ export async function getEligibleFeedLinks(args: {
   offset: number;
 }): Promise<FeedLinkRow[]> {
   return callRows<FeedLinkRow>(
-    "CALL get_eligible_feed_links(?, ?, ?, ?, ?, ?)",
+    "SELECT * FROM get_eligible_feed_links($1, $2, $3, $4, $5, $6)",
     [
       args.viewerId,
       args.activeLikeCount,
@@ -130,5 +124,5 @@ export type TopLikerRow = {
 };
 
 export async function getTopLikers(limit = 5): Promise<TopLikerRow[]> {
-  return callRows<TopLikerRow>("CALL get_top_likers(?)", [limit]);
+  return callRows<TopLikerRow>("SELECT * FROM get_top_likers($1)", [limit]);
 }

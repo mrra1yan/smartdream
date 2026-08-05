@@ -51,7 +51,7 @@ export function mapSettingsRow(row: Record<string, unknown>): SettingsRow {
     elite_weight: num(row.elite_weight, 50),
     offer_likes_required: num(row.offer_likes_required, 100),
     offer_autolike_minutes: num(row.offer_autolike_minutes, 60),
-    offer_active: Boolean(row.offer_active),
+    offer_active: row.offer_active as boolean,
     boost_price_no_expiry: row.boost_price_no_expiry == null ? null : Number(row.boost_price_no_expiry),
     boost_price_1w: row.boost_price_1w == null ? null : Number(row.boost_price_1w),
     boost_price_1m: row.boost_price_1m == null ? null : Number(row.boost_price_1m),
@@ -82,12 +82,11 @@ export function mapSettingsRow(row: Record<string, unknown>): SettingsRow {
 }
 
 export async function getSettingsRow(): Promise<SettingsRow | null> {
-  const [rows] = await pool.query("SELECT * FROM settings WHERE id = '1' LIMIT 1");
-  const row = (rows as Record<string, unknown>[])[0];
-  return row ? mapSettingsRow(row) : null;
+  const { rows } = await pool.query("SELECT * FROM settings WHERE id = '1' LIMIT 1");
+  return rows[0] ? mapSettingsRow(rows[0]) : null;
 }
 
-/** Whitelisted settings columns (mirror of the old admin settings form). */
+/** Whitelisted settings columns. */
 const SETTINGS_COLS: Record<string, string> = {
   whatsapp_number: "whatsapp_number",
   active_like_count: "active_like_count",
@@ -127,7 +126,7 @@ export async function updateSettingsRow(
 ): Promise<void> {
   const entries = Object.entries(patch).filter(([key]) => key in SETTINGS_COLS);
   if (entries.length === 0) return;
-  const sets = entries.map(([key]) => `${SETTINGS_COLS[key]} = ?`);
+  const sets = entries.map(([key], i) => `${SETTINGS_COLS[key]} = $${i + 1}`);
   const values = entries.map(([, value]) => value ?? null);
   await pool.query(`UPDATE settings SET ${sets.join(", ")} WHERE id = '1'`, values);
 }
