@@ -498,16 +498,12 @@ BEGIN
   v_lock_recv  := hashtext(p_receiver_id::text);
   v_lock_liker := hashtext(p_liker_id::text);
 
-  -- Acquire all three advisory locks
-  IF NOT pg_try_advisory_lock(v_lock_pair)  THEN RETURN 0; END IF;
-  IF NOT pg_try_advisory_lock(v_lock_recv)  THEN
-    PERFORM pg_advisory_unlock(v_lock_pair); RETURN 0;
-  END IF;
-  IF NOT pg_try_advisory_lock(v_lock_liker) THEN
-    PERFORM pg_advisory_unlock(v_lock_pair);
-    PERFORM pg_advisory_unlock(v_lock_recv);
-    RETURN 0;
-  END IF;
+  -- Acquire all three locks in a consistent order. Concurrent ad
+  -- completions wait instead of being rejected just because multiple view
+  -- timers finished at the same time.
+  PERFORM pg_advisory_lock(v_lock_pair);
+  PERFORM pg_advisory_lock(v_lock_recv);
+  PERFORM pg_advisory_lock(v_lock_liker);
 
   BEGIN
     -- 1. 12h cooldown

@@ -82,13 +82,6 @@ export async function commitLikeAction(
     return { ok: false, error: "too_early" };
   }
 
-  // Single-use: consume only after the view duration is valid so an early
-  // request can retry with the same server-issued token.
-  if (!consumeAdViewToken(claims.jti)) {
-    console.warn("[commitLikeAction] Ad-view token already used:", claims.jti);
-    return { ok: false, error: "ad-view token already used" };
-  }
-
   // Parallel: link+owner in one join, settings via Redis-cached helper.
   const [link, settings] = await Promise.all([getLinkOwner(linkId), getSettings()]);
 
@@ -121,8 +114,15 @@ export async function commitLikeAction(
   });
 
   if (!committed) {
-    console.warn("[commitLikeAction] RPC rejected (cooldown, deficit, or lock failure) for link:", linkId);
+    console.warn("[commitLikeAction] RPC rejected (cooldown or owner eligibility) for link:", linkId);
     return { ok: false, error: "cooldown_active" };
+  }
+
+  // The DB commit is authoritative. Consume the token only after the like
+  // row and likes_count update succeeded; a transient DB failure must remain
+  // retryable with the same token.
+  if (!consumeAdViewToken(claims.jti)) {
+    console.warn("[commitLikeAction] Token was already consumed after a successful DB commit:", claims.jti);
   }
 
   // Fire realtime notifications (best-effort): the receiver's stats channel

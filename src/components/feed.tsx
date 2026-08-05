@@ -59,7 +59,8 @@ export function Feed({
 
   // Hide links that have already been liked (committed)
   const committed = useAdStore((s) => s.committed);
-  const visibleLinks = links.filter((link) => !committed[link.id]);
+  const viewed = useAdStore((s) => s.viewed);
+  const visibleLinks = links.filter((link) => !committed[link.id] && !viewed[link.id]);
 
   const fetchPage = useCallback(
     async (nextOffset: number): Promise<number> => {

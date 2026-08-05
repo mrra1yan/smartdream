@@ -22,6 +22,7 @@ type AdStore = {
   active: ActiveAd[];
   queue: QueuedAd[];
   committed: Record<string, number>;
+  viewed: Record<string, number>;
   maxSlots: number;
   adBlockerDetected: boolean;
   setAdBlockerDetected: (val: boolean) => void;
@@ -115,6 +116,12 @@ async function commitAndFinalise(
   token: string,
   source?: "boosted",
 ) {
+  // Hide the link as soon as the required view duration is complete. The
+  // server result still decides whether the like count is incremented.
+  useAdStore.setState((s) => ({
+    viewed: { ...s.viewed, [linkId]: (s.viewed[linkId] ?? 0) + 1 },
+  }));
+
   // ── Server commit (background) ────────────────────────────────────
   let ok = false;
 
@@ -163,6 +170,7 @@ export const useAdStore = create<AdStore>((set, get) => {
     active: [],
     queue: [],
     committed: {},
+    viewed: {},
     maxSlots: MAX_CONCURRENT_ADS,
     adBlockerDetected: false,
     setAdBlockerDetected: (val) => set({ adBlockerDetected: val }),
@@ -226,6 +234,7 @@ export const useAdStore = create<AdStore>((set, get) => {
           if (!current || current.startRequestId !== startRequestId) return;
 
           if (!("token" in result)) {
+            console.warn('[markLoaded] startAdView rejected:', linkId, result.error);
             set((s) => ({
               active: s.active.filter((a) => a.linkId !== linkId),
             }));
