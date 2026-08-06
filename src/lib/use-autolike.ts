@@ -25,7 +25,7 @@ type Status = {
 /** Main loop tick interval in ms. Balances responsiveness with database load:
  *  - 1000ms = ~30 DB round-trips/min/user (original, too aggressive)
  *  - 5000ms = ~6 DB round-trips/min/user (5× reduction, still responsive)
- * Ads still complete on their own per-ad setTimeout (TOTAL_AD_SECONDS=9s),
+ * Ads still complete on their own per-ad setTimeout (TOTAL_AD_SECONDS=14s),
  * so the tick only affects feed refill + progress display granularity. */
 const LOOP_TICK_MS = 5000;
 export function useAutoLike() {

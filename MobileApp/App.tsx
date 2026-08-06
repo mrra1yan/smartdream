@@ -29,10 +29,17 @@ const DEFAULT_DOWNLOAD_URL = 'https://github.com/nurulhudda247/SmartDream-Releas
 const ALLOWED_WEB_HOSTS = ['sd.docstec.cloud'];
 const ALLOWED_DOWNLOAD_HOSTS = ['github.com'];
 
-// ── Ad timing (mirrors web layer src/lib/types.ts) ────────────────────
-const TOTAL_AD_MS = 14000;       // 4 s loading + 10 s viewing
+// ── Ad timing ──────────────────────────────────────────────────────────
+// MUST stay synchronised with web layer src/lib/types.ts:
+//   TOTAL_AD_SECONDS = AD_LOADING_SECONDS + AD_VIEW_SECONDS = 4 + 10 = 14
+// The native visual timer uses `startedAt` supplied by the web in each
+// OPEN_AD message, so both layers measure from the same wall-clock moment.
+const TOTAL_AD_MS = 14000;       // = TOTAL_AD_SECONDS * 1000
 const TIMER_TICK_MS = 1000;
 const MAX_DISPLAY_ADS = 3;
+/** Extra grace period before replacing a full slot when a new OPEN_AD
+ *  arrives — avoids flicker from sub-second timer drift. */
+const DISPLAY_FULL_GRACE_MS = 500;
 
 type AdInfo = {
   url: string;
@@ -156,7 +163,7 @@ function App(): React.JSX.Element {
   }
 
   // ── Bridge dispatch ───────────────────────────────────────────────────
-  const dispatchToWeb = (payload: Record<string, unknown>) => {
+  const dispatchToWeb = useCallback((payload: Record<string, unknown>) => {
     if (!mainWebViewRef.current) return;
     const serialized = JSON.stringify(
       JSON.stringify({ ...payload, nonce: sessionNonceRef.current })
@@ -175,7 +182,7 @@ function App(): React.JSX.Element {
       })();
       true;
     `);
-  };
+  }, []);
 
   // ── Remove an ad from display (manual X tap or CLOSE_AD from web) ────
   const removeAd = useCallback((linkId: string) => {
@@ -192,22 +199,29 @@ function App(): React.JSX.Element {
     }
   }, []);
 
-  // ── Native-side visual timer (14 s cycle, no AD_DISMISSED) ───────────
+  // ── Native-side visual timer (14 s cycle) ─────────────────────────────
   // The commit is handled by the web layer's setTimeout / safety-net.
-  // Native only handles visual cycling so PiP users see fresh ads on time.
+  // Native handles visual cycling so PiP users see fresh ads on time.
+  // When a slot's time is up we send AD_DISMISSED to web so it can
+  // reconcile immediately instead of waiting for its own timer.
   useEffect(() => {
+    let cleanupSweepCounter = 0;
     const interval = setInterval(() => {
       const now = Date.now();
       const display = displayAdsRef.current;
       let changed = false;
       let next = display;
+      const dismissedIds: string[] = [];
+
       for (const ad of display) {
         if (ad.startedAt > 0 && now - ad.startedAt >= TOTAL_AD_MS) {
           next = next.filter((a) => a.linkId !== ad.linkId);
           visuallyDismissedRef.current.add(ad.linkId);
+          dismissedIds.push(ad.linkId);
           changed = true;
         }
       }
+
       if (changed) {
         setDisplayAds(next);
         const removed = display.filter((ad) => !next.some((a) => a.linkId === ad.linkId));
@@ -216,10 +230,29 @@ function App(): React.JSX.Element {
           for (const ad of removed) delete nv[ad.linkId];
           return nv;
         });
+        // Notify web so it can clean up its active list promptly.
+        // reason: 'expired' tells web this ad was fully watched (natural
+        // 14s timeout) so it must still be committed, not silently discarded.
+        for (const id of dismissedIds) {
+          dispatchToWeb({ type: 'AD_DISMISSED', linkId: id, reason: 'expired' });
+        }
+      }
+
+      // Periodic cleanup: sweep visuallyDismissedRef for entries whose ads
+      // are no longer in the web's active list (confirmed resolved).
+      cleanupSweepCounter++;
+      if (cleanupSweepCounter >= 30) {
+        cleanupSweepCounter = 0;
+        const currentIds = new Set(displayAdsRef.current.map((a) => a.linkId));
+        for (const id of visuallyDismissedRef.current) {
+          if (!currentIds.has(id)) {
+            visuallyDismissedRef.current.delete(id);
+          }
+        }
       }
     }, TIMER_TICK_MS);
     return () => clearInterval(interval);
-  }, []);
+  }, [dispatchToWeb]);
 
   // ── PiP + network + app state ─────────────────────────────────────────
   useEffect(() => {
@@ -258,13 +291,15 @@ function App(): React.JSX.Element {
       });
       return () => sub.remove();
     }
-  }, [dispatchToWeb]);
+  }, []);
 
-  // PiP gate: enable when ads are showing OR auto-like is active
+  // PiP gate: only enable when auto-like is actually running. Ads shown from
+  // a manual "Like" tap must NOT trigger PiP on their own — PiP is reserved
+  // for the "auto-like on, app backgrounded" flow.
   useEffect(() => {
     if (Platform.OS === 'android' && NativeModules.PipModule) {
-      const enable = displayAds.length > 0 || autoLikeActiveRef.current === true;
-      try { NativeModules.PipModule.setPiPEnabled(enable); } catch (e) {}
+      const enable = autoLikeActiveRef.current === true;
+      try { NativeModules.PipModule.setPiPEnabled(enable); } catch (e) { console.error('[PiP] setPiPEnabled failed:', e); }
     }
   }, [displayAds]);
 
@@ -313,6 +348,11 @@ function App(): React.JSX.Element {
         dispatchToWeb({ type: 'BRIDGE_INIT' }); // ensure nonce
 
         const current = displayAdsRef.current;
+        // Use web-provided startedAt so both layers measure from the same
+        // wall-clock moment.  Fallback to Date.now() for older web builds.
+        const adStartedAt = typeof data.startedAt === 'number' && data.startedAt > 0
+          ? data.startedAt
+          : Date.now();
 
         // Already showing this ad?
         const existing = current.find((a) => a.linkId === data.linkId);
@@ -320,22 +360,40 @@ function App(): React.JSX.Element {
           if (existing.url === data.url) return; // duplicate
           // URL changed — update in place
           setDisplayAds(current.map((a) =>
-            a.linkId === data.linkId ? { ...a, url: data.url, startedAt: Date.now(), loadedAt: undefined } : a
+            a.linkId === data.linkId ? { ...a, url: data.url, startedAt: adStartedAt, loadedAt: undefined } : a
           ));
           bumpAdVersion(data.linkId);
           visuallyDismissedRef.current.delete(data.linkId);
           return;
         }
 
-        // If display is full, ignore — web layer's queue handles overflow.
-        // The web will send another OPEN_AD when a slot frees up (via
-        // startNext after an ad completes).
+        // Display full?  Check if any slot has an ad past its time — replace
+        // the oldest overdue one instead of silently dropping.
         if (current.length >= MAX_DISPLAY_ADS) {
+          const now = Date.now();
+          const overdueIdx = current.findIndex(
+            (a) => a.startedAt > 0 && (now - a.startedAt) >= (TOTAL_AD_MS + DISPLAY_FULL_GRACE_MS)
+          );
+          if (overdueIdx >= 0) {
+            const replaced = current[overdueIdx];
+            // This slot was already past its 14s window — same as a natural
+            // expiry, so it must be committed, not just dismissed.
+            dispatchToWeb({ type: 'AD_DISMISSED', linkId: replaced.linkId, reason: 'expired' });
+            visuallyDismissedRef.current.add(replaced.linkId);
+            const next = [...current];
+            next[overdueIdx] = { url: data.url, linkId: data.linkId, startedAt: adStartedAt, loadedAt: undefined };
+            setDisplayAds(next);
+            bumpAdVersion(data.linkId);
+            visuallyDismissedRef.current.delete(data.linkId);
+            return;
+          }
+          // All slots still within time — defer to web queue (SYNC_ADS will
+          // re-send when a slot frees).
           console.log('[OPEN_AD] Display full, deferring to web queue:', data.linkId);
           return;
         }
 
-        const newAd: AdInfo = { url: data.url, linkId: data.linkId, startedAt: Date.now(), loadedAt: undefined };
+        const newAd: AdInfo = { url: data.url, linkId: data.linkId, startedAt: adStartedAt, loadedAt: undefined };
         setDisplayAds([...current, newAd]);
         bumpAdVersion(data.linkId);
         visuallyDismissedRef.current.delete(data.linkId);
@@ -345,9 +403,8 @@ function App(): React.JSX.Element {
         if (Platform.OS === 'android' && NativeModules.PipModule) {
           try {
             NativeModules.PipModule.setAutoLikeActive(autoLikeActiveRef.current);
-            const enable = displayAdsRef.current.length > 0 || autoLikeActiveRef.current === true;
-            NativeModules.PipModule.setPiPEnabled(enable);
-          } catch (e) {}
+            NativeModules.PipModule.setPiPEnabled(autoLikeActiveRef.current);
+          } catch (e) { console.error('[SYNC_AUTO_LIKE] PipModule call failed:', e); }
         }
 
       } else if (data.type === 'CLOSE_AD') {
@@ -652,7 +709,7 @@ const styles = StyleSheet.create({
   },
   pipLabelText: { color: '#fff', fontSize: 8, fontWeight: 'bold' },
   mainWebViewContainer: { flex: 1 },
-  hiddenMainWebView: { position: 'absolute', width: 0, height: 0, opacity: 0 },
+  hiddenMainWebView: { position: 'absolute', width: 1, height: 1, opacity: 0.01, overflow: 'hidden' },
   innerContainer: { flex: 1, backgroundColor: '#000' },
   mainWebView: { flex: 1, backgroundColor: 'transparent' },
   loadingContainer: {

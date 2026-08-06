@@ -40,7 +40,7 @@ export function Feed({
   initialOffset,
   maxSlots = MAX_CONCURRENT_ADS,
 }: {
-  endpoint: "/api/feed" | "/api/boosted-feed";
+  endpoint: "/api/feed";
   initialLinks: FeedLink[];
   initialOffset: number;
   maxSlots?: number;
@@ -89,16 +89,21 @@ export function Feed({
     let cancelled = false;
 
     (async () => {
-      let currentOffset = initialOffset;
-      let pages = 0;
-      while (!cancelled && pages < MAX_PREFETCH_PAGES) {
-        const fetched = await fetchPage(currentOffset);
-        if (cancelled || fetched === 0) break;
-        currentOffset += fetched;
-        pages += 1;
-        if (fetched < 50) break;
+      try {
+        let currentOffset = initialOffset;
+        let pages = 0;
+        while (!cancelled && pages < MAX_PREFETCH_PAGES) {
+          const fetched = await fetchPage(currentOffset);
+          if (cancelled || fetched === 0) break;
+          currentOffset += fetched;
+          pages += 1;
+          if (fetched < 50) break;
+        }
+      } catch {
+        // Network error — leave existing links visible, just stop loading.
+      } finally {
+        if (!cancelled) setLoading(false);
       }
-      if (!cancelled) setLoading(false);
     })();
 
     return () => {
@@ -135,7 +140,7 @@ export function Feed({
           if (page.length < 50) break;
           scanOffset += page.length;
         } catch {
-          return; // leave the list as-is on a failed scan
+          break; // stop fetching more pages on error, process what we have
         }
       }
       const fresh = dedupeById(freshLinks);

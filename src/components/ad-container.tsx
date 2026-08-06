@@ -32,7 +32,7 @@ let nativeBridgeNonce: string | null = null;
  *  had a chance to set nativeBridgeNonce. They are held here and flushed
  *  once the nonce is known, closing the race between native injecting
  *  BRIDGE_INIT and the ad WebView firing onLoadEnd. */
-const pendingMessages: Array<{ type: "AD_LOADED" | "AD_DISMISSED"; linkId: string; nonce: string }> = [];
+const pendingMessages: Array<{ type: "AD_LOADED" | "AD_DISMISSED"; linkId: string; nonce: string; reason?: string }> = [];
 
 function parseNativeMessage(event: { data: unknown }): any {
   try {
@@ -95,7 +95,13 @@ export function AdContainer() {
                 useAdStore.getState().markLoaded(msg.linkId);
               }
             } else if (msg.type === "AD_DISMISSED") {
-              useAdStore.getState().dismiss(msg.linkId);
+              if (msg.reason === "expired") {
+                // Fully watched (native's 14s timer expired) — must still
+                // be committed, not silently dropped.
+                useAdStore.getState().tickHeartbeat();
+              } else {
+                useAdStore.getState().dismiss(msg.linkId);
+              }
             }
           }
         }
@@ -303,6 +309,7 @@ function AdModal({
               type: data.type as "AD_LOADED" | "AD_DISMISSED",
               linkId: data.linkId,
               nonce: data.nonce,
+              reason: typeof data.reason === "string" ? data.reason : undefined,
             });
           }
           return;
@@ -328,7 +335,15 @@ function AdModal({
       }
 
       if (data.type === "AD_DISMISSED" && data.linkId === linkId) {
-        dismiss(linkId);
+        if (data.reason === "expired") {
+          // Native's own 14s visual timer expired naturally — the ad was
+          // fully watched, so let the normal overdue-commit path (which
+          // checks elapsed time + token) finish it instead of discarding
+          // the pending like.
+          useAdStore.getState().tickHeartbeat();
+        } else {
+          dismiss(linkId);
+        }
       } else if (data.type === "AD_LOADED" && data.linkId === linkId) {
         // markLoaded is idempotent — it checks startedAt/token/starting
         // internally.  Previously the startedAt===0 guard prevented this

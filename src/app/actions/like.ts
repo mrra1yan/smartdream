@@ -6,7 +6,7 @@ import { issueAdViewToken, verifyAdViewToken, consumeAdViewToken } from "@/lib/a
 import { checkRateLimit } from "@/lib/rate-limit";
 import { cacheDelPattern } from "@/lib/redis";
 import { bangladeshMidnightISO } from "@/lib/timezone";
-import { TOTAL_AD_SECONDS } from "@/lib/types";
+import { TOTAL_AD_SECONDS, LINK_COOLDOWN_HOURS } from "@/lib/types";
 import { getLinkOwner } from "@/lib/repos/links";
 import { processLikeCommit } from "@/lib/repos/rpc";
 import { publishLinksUpdate, publishStatsUpdate } from "@/lib/realtime-publish";
@@ -16,9 +16,21 @@ import { publishLinksUpdate, publishStatsUpdate } from "@/lib/realtime-publish";
 // overhead.
 const AD_VIEW_RATE_LIMIT = { maxAttempts: 60, windowMs: 60_000, perUserOnly: true } as const;
 
+/**
+ * Starts an ad-view session and returns a signed JWT that the client must
+ * present when committing the like.
+ *
+ * @param clientStartedAtMs — The wall-clock time (ms since epoch) when the ad
+ *   was first opened on the client.  The server uses this (instead of its own
+ *   `Date.now()`) so the elapsed-time check at commit time matches what the
+ *   user actually experienced, regardless of network latency.  The value is
+ *   sanity-checked: must not be in the future and must not be more than 30 s
+ *   in the past.  If omitted, `Date.now()` is used as a fallback.
+ */
 export async function startAdView(
   linkId: string,
   source?: "boosted",
+  clientStartedAtMs?: number,
 ): Promise<{ token: string } | { error: string }> {
   const user = await getCurrentUser();
   if (!user || user.status !== "approved") return { error: "unauthorized" };
@@ -32,11 +44,26 @@ export async function startAdView(
     return { error: "invalid link" };
   }
 
+  // Sanity-check the client-provided timestamp: not in the future, not too stale.
+  const now = Date.now();
+  let effectiveStartedAtMs = now;
+  if (typeof clientStartedAtMs === "number" && clientStartedAtMs > 0) {
+    if (clientStartedAtMs > now + 5_000) {
+      // Clock skew / tampering — clamp to now.
+      effectiveStartedAtMs = now;
+    } else if (now - clientStartedAtMs > 30_000) {
+      // More than 30 s stale — clamp to 30 s ago to prevent abuse.
+      effectiveStartedAtMs = now - 30_000;
+    } else {
+      effectiveStartedAtMs = clientStartedAtMs;
+    }
+  }
+
   const token = await issueAdViewToken({
     sub: user.id,
     linkId,
     source,
-    startedAtMs: Date.now(),
+    startedAtMs: effectiveStartedAtMs,
   });
   return { token };
 }
@@ -111,6 +138,7 @@ export async function commitLikeAction(
     offerAutoLikeMinutes: settings.offerAutoLikeMinutes,
     activeWindowHours: settings.activeWindowHours,
     activeLikeCount: settings.activeLikeCount,
+    cooldownHours: LINK_COOLDOWN_HOURS,
     todayIso: bangladeshMidnightISO(),
   });
 
@@ -122,7 +150,7 @@ export async function commitLikeAction(
   // The DB commit is authoritative. Consume the token only after the like
   // row and likes_count update succeeded; a transient DB failure must remain
   // retryable with the same token.
-  if (!consumeAdViewToken(claims.jti)) {
+  if (!(await consumeAdViewToken(claims.jti))) {
     console.warn("[commitLikeAction] Token was already consumed after a successful DB commit:", claims.jti);
   }
 

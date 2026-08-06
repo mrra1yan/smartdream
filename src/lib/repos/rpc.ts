@@ -18,13 +18,14 @@ export type LikeCommitArgs = {
   offerAutoLikeMinutes: number;
   activeWindowHours: number;
   activeLikeCount: number;
+  cooldownHours: number;
   todayIso: string;
 };
 
 /** 1 = committed, 0 = rejected (cooldown / owner deficit / lock failure). */
 export async function processLikeCommit(args: LikeCommitArgs): Promise<boolean> {
   const result = await callOut<number>(
-    `SELECT process_like_commit($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) AS result`,
+    `SELECT process_like_commit($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12) AS result`,
     [
       args.likerId,
       args.linkId,
@@ -36,6 +37,7 @@ export async function processLikeCommit(args: LikeCommitArgs): Promise<boolean> 
       args.offerAutoLikeMinutes,
       args.activeWindowHours,
       args.activeLikeCount,
+      args.cooldownHours,
       args.todayIso,
     ],
   );

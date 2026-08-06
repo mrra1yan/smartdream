@@ -445,7 +445,7 @@ END;
 $$;
 
 -- ---- process_like_commit() --------------------------------------------------
--- Main like procedure: advisory locks, 12h cooldown, quota management.
+-- Main like procedure: advisory locks, cooldown, quota management.
 -- Returns: 1 = committed, 0 = rejected
 CREATE OR REPLACE FUNCTION process_like_commit(
   p_liker_id              UUID,
@@ -458,6 +458,7 @@ CREATE OR REPLACE FUNCTION process_like_commit(
   p_offer_autolike_minutes INTEGER,
   p_active_window_hours   INTEGER,
   p_active_like_count     INTEGER,
+  p_cooldown_hours        INTEGER,
   p_today_iso             TIMESTAMPTZ
 ) RETURNS INTEGER
 LANGUAGE plpgsql
@@ -506,11 +507,11 @@ BEGIN
   PERFORM pg_advisory_lock(v_lock_liker);
 
   BEGIN
-    -- 1. 12h cooldown
+    -- 1. Cooldown (parameterised — matches get_eligible_feed_links)
     SELECT COUNT(*) INTO v_recent
     FROM likes
     WHERE liker_id = p_liker_id AND link_id = p_link_id
-      AND created_at >= NOW() - INTERVAL '12 hours';
+      AND created_at >= NOW() - (p_cooldown_hours || ' hours')::INTERVAL;
 
     IF v_recent > 0 THEN
       PERFORM pg_advisory_unlock(v_lock_pair);

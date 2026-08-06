@@ -36,17 +36,20 @@ export function AutoLikeButton() {
     void refreshStatus();
   }, [refreshStatus]);
 
-  // Sync Auto-Like active status to React Native app to restrict PiP background widget
+  // Sync Auto-Like's actual on/off toggle state (not just plan eligibility)
+  // to React Native so it can gate the PiP background widget correctly —
+  // PiP must only appear while auto-like is actually running, not merely
+  // because the user is eligible for it.
   useEffect(() => {
     if (typeof window !== "undefined" && (window as any).ReactNativeWebView) {
       (window as any).ReactNativeWebView.postMessage(
         JSON.stringify({
           type: "SYNC_AUTO_LIKE_STATUS",
-          active: !!status?.active,
+          active: !!running,
         })
       );
     }
-  }, [status?.active]);
+  }, [running]);
 
   const toBengaliNumber = (num: number | string): string => {
     const str = String(num);

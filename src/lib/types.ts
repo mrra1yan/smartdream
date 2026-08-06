@@ -24,8 +24,9 @@ export const AD_LOADING_SECONDS = 4;
 export const AD_VIEW_SECONDS = 10;
 export const TOTAL_AD_SECONDS = AD_LOADING_SECONDS + AD_VIEW_SECONDS; // 14s total
 export const MAX_CONCURRENT_ADS = 3;
-/** Hours before a liked link can reappear in the viewer's feed. */
-// TEMP: cooldown off — value kept for when we re-enable
+/** Hours before a liked link can reappear in the viewer's feed.
+ *  Enforced in both the feed query (get_eligible_feed_links) and the
+ *  like-commit guard (process_like_commit). */
 export const LINK_COOLDOWN_HOURS = 12;
 
 /** A profile row stripped of sensitive internal flags. Safe to expose to the
