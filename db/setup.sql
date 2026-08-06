@@ -374,7 +374,7 @@ BEGIN
   WHERE us.is_elite
      OR us.is_boosted
      OR (EXTRACT(EPOCH FROM (NOW() - us.profile_created_at)) < 86400 AND us.recv_total < v_active_like_count)
-     OR (us.given_24h >= v_active_like_count AND NOT (us.given_24h > 0 AND us.recv_24h >= us.given_24h));
+     OR (us.given_24h >= v_active_like_count AND us.recv_24h <= us.given_24h);
 END;
 $$;
 
