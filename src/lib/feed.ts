@@ -19,7 +19,12 @@ export type FeedLinkRow = {
 // until the next fetch), so no explicit invalidation.
 const FEED_CACHE_TTL_SECONDS = 15;
 
+let isEligibilityCacheRefreshing = false;
+
 async function ensureFeedEligibilityCacheRefreshed() {
+  if (isEligibilityCacheRefreshing) {
+    return;
+  }
   try {
     const { rows } = await pool.query(
       "SELECT MAX(refreshed_at) AS max_refreshed FROM feed_eligibility_cache"
@@ -28,10 +33,16 @@ async function ensureFeedEligibilityCacheRefreshed() {
     const shouldRefresh = !maxRefreshed || (Date.now() - new Date(maxRefreshed).getTime() > 120_000);
 
     if (shouldRefresh) {
+      isEligibilityCacheRefreshing = true;
       console.log("[feed] Auto-refreshing feed eligibility cache...");
-      await pool.query("SELECT refresh_feed_eligibility_cache();");
+      try {
+        await pool.query("SELECT refresh_feed_eligibility_cache();");
+      } finally {
+        isEligibilityCacheRefreshing = false;
+      }
     }
   } catch (err) {
+    isEligibilityCacheRefreshing = false;
     console.error("[feed] Error auto-refreshing feed eligibility cache:", err);
   }
 }
@@ -46,8 +57,8 @@ export async function getFeed(
   const cached = await cacheGet<{ links: FeedLinkRow[]; nextOffset: number }>(cacheKey);
   if (cached) return cached;
 
-  // Auto-refresh the database eligibility cache if it is stale
-  await ensureFeedEligibilityCacheRefreshed();
+  // Auto-refresh the database eligibility cache in background if it is stale
+  ensureFeedEligibilityCacheRefreshed();
 
   const settings = await getSettings();
 
