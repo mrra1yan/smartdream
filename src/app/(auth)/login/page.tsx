@@ -18,6 +18,15 @@ export default async function LoginPage(props: {
   return (
     <div className="flex flex-col gap-4">
 
+      {/* ── TaziMa Helping Hand Badge ────────────────────────────── */}
+      <div className="flex justify-center mb-1">
+        <div className="inline-flex items-center gap-1.5 rounded-full bg-accent/10 px-4 py-1.5 border border-accent/20 backdrop-blur-sm shadow-sm">
+          <span className="text-xs font-bold text-accent tracking-wider uppercase">
+            TaziMa Helping Hand
+          </span>
+        </div>
+      </div>
+
       {/* ── Compact hero ─────────────────────────────────────────── */}
       <AuthHero title={t("auth.welcomeBack")} subtitle={t("auth.loginSubtitle")} />
 
