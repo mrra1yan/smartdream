@@ -31,6 +31,7 @@ export async function startAdView(
   linkId: string,
   source?: "boosted",
   clientStartedAtMs?: number,
+  clientNowMs?: number,
 ): Promise<{ token: string } | { error: string }> {
   const user = await getCurrentUser();
   if (!user || user.status !== "approved") return { error: "unauthorized" };
@@ -45,17 +46,17 @@ export async function startAdView(
   }
 
   // Sanity-check the client-provided timestamp: not in the future, not too stale.
+  // Use relative duration if clientNowMs is provided to eliminate clock skew.
   const now = Date.now();
   let effectiveStartedAtMs = now;
   if (typeof clientStartedAtMs === "number" && clientStartedAtMs > 0) {
-    if (clientStartedAtMs > now + 5_000) {
-      // Clock skew / tampering — clamp to now.
-      effectiveStartedAtMs = now;
-    } else if (now - clientStartedAtMs > 30_000) {
-      // More than 30 s stale — clamp to 30 s ago to prevent abuse.
+    const clientNow = typeof clientNowMs === "number" && clientNowMs > 0 ? clientNowMs : now;
+    const clientElapsed = Math.max(0, clientNow - clientStartedAtMs);
+    effectiveStartedAtMs = now - clientElapsed;
+
+    // Sanity check to prevent abuse: clientElapsed shouldn't be suspiciously large
+    if (clientElapsed > 30_000) {
       effectiveStartedAtMs = now - 30_000;
-    } else {
-      effectiveStartedAtMs = clientStartedAtMs;
     }
   }
 

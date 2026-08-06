@@ -1,0 +1,5 @@
+- Prefers end-to-end, thorough audits that trace all interconnected parts of a feature and identify root causes—not just the immediately visible symptom. Confidence: 0.9
+- Prefers communication in Bangla/Bengali. Confidence: 0.85
+- Prefers completed code changes to be committed and pushed to the configured Git remote, rather than left only in the local working tree. Confidence: 0.9
+- Prefers setup and deployment commands to be safe to rerun (idempotent), with duplicate side effects explicitly checked before reapplying them. Confidence: 0.9
+- Prefers applying only the necessary changed code or database function when a full setup rerun is unnecessary, while still prioritizing a safe/idempotent procedure. Confidence: 0.88

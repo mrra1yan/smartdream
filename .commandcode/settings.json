@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Shell(npm:*)",
+      "Shell(npx tsc --noEmit)",
+      "Shell(./gradlew:*)",
+      "Shell(npx eslint App.tsx)",
+      "Shell(npx eslint --no-ignore --no-warn-ignored App.tsx)",
+      "Shell(find:*)",
+      "Shell(find app/build/outputs/apk/release -maxdepth 1 -type f -name '*.apk' -print0 | xargs -0 shasum -a 256)",
+      "Shell(git add -- MobileApp/App.tsx MobileApp/android/app/src/main/AndroidManifest.xml MobileApp/android/app/src/main/java/com/smartdreamapp/MainActivity.kt MobileApp/android/app/src/main/java/com/smartdreamapp/PipModule.kt 'src/app/(main)/page.tsx' src/app/actions/like.ts src/components/ad-container.tsx src/lib/ad-store.ts src/lib/ad-view-token.ts src/lib/feed.ts src/lib/types.ts && git commit -F - <<'EOF' fix: sync mobile ads and PiP lifecycle Co-authored-by: CommandCodeBot <noreply@commandcode.ai> EOF)",
+      "Shell(git:*)",
+      "Shell(git add -- db/setup.sql src/app/actions/like.ts src/components/feed.tsx src/lib/ad-store.ts && git commit -F - <<'EOF' fix: finalize viewed ad counts Co-authored-by: CommandCodeBot <noreply@commandcode.ai> EOF)"
+    ],
+    "deny": [],
+    "defaultMode": "default"
+  }
+}

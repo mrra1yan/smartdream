@@ -323,8 +323,10 @@ export const useAdStore = create<AdStore>((set, get) => {
         try {
           // Pass the client's actual ad-open time so the server can verify the
           // full 14 s elapsed, rather than measuring from server-receive time.
+          // Also pass Date.now() as clientNowMs to eliminate clock skew.
           const clientStartedAtMs = ad.startedAt;
-          const result = await startAdView(linkId, ad.source, clientStartedAtMs);
+          const clientNowMs = Date.now();
+          const result = await startAdView(linkId, ad.source, clientStartedAtMs, clientNowMs);
           const current = get().active.find((a) => a.linkId === linkId);
           if (!current || current.startRequestId !== startRequestId) return;
 
