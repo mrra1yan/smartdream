@@ -49,6 +49,18 @@ class MainActivity : ReactActivity() {
     }
   }
 
+  private val pipHandler = android.os.Handler(android.os.Looper.getMainLooper())
+  private var pipResumeRunnable: Runnable? = null
+  // Android (or the device's battery optimizer) can re-pause WebView JS
+  // timers at any point during a long PiP session, not just once right after
+  // entry -- a single burst of resume calls right after onPictureInPictureModeChanged
+  // fires only covers the first few seconds. Auto-like's loop, the ad-view
+  // commit timers, and the native visual timer's web-side counterpart all
+  // live in that JS, so a re-pause without a matching resume silently stops
+  // everything until the user manually reopens the app. Keep re-resuming on
+  // an interval for as long as we're actually still in PiP.
+  private val PIP_RESUME_INTERVAL_MS = 3000L
+
   private fun resumeAllWebViews(view: View) {
     if (view is WebView) {
       try {
@@ -64,31 +76,31 @@ class MainActivity : ReactActivity() {
     }
   }
 
+  private fun startPipResumeLoop() {
+    stopPipResumeLoop()
+    val runnable = object : Runnable {
+      override fun run() {
+        if (isFinishing || isDestroyed || !isInPictureInPictureMode) return
+        resumeAllWebViews(window.decorView)
+        pipHandler.postDelayed(this, PIP_RESUME_INTERVAL_MS)
+      }
+    }
+    pipResumeRunnable = runnable
+    pipHandler.post(runnable)
+  }
+
+  private fun stopPipResumeLoop() {
+    pipResumeRunnable?.let { pipHandler.removeCallbacks(it) }
+    pipResumeRunnable = null
+  }
+
   override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean, newConfig: Configuration) {
     super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig)
 
     if (isInPictureInPictureMode) {
-      val handler = android.os.Handler(android.os.Looper.getMainLooper())
-      try {
-        resumeAllWebViews(window.decorView)
-        handler.postDelayed({
-          if (!isFinishing && !isDestroyed && isInPictureInPictureMode) {
-            resumeAllWebViews(window.decorView)
-          }
-        }, 500)
-        handler.postDelayed({
-          if (!isFinishing && !isDestroyed && isInPictureInPictureMode) {
-            resumeAllWebViews(window.decorView)
-          }
-        }, 1500)
-        handler.postDelayed({
-          if (!isFinishing && !isDestroyed && isInPictureInPictureMode) {
-            resumeAllWebViews(window.decorView)
-          }
-        }, 3000)
-      } catch (e: Exception) {
-        e.printStackTrace()
-      }
+      startPipResumeLoop()
+    } else {
+      stopPipResumeLoop()
     }
 
     val reactApplication = application as? ReactApplication
@@ -96,6 +108,11 @@ class MainActivity : ReactActivity() {
     if (reactContext != null) {
       PipModule.sendPiPModeChangedEvent(reactContext as com.facebook.react.bridge.ReactApplicationContext, isInPictureInPictureMode)
     }
+  }
+
+  override fun onDestroy() {
+    stopPipResumeLoop()
+    super.onDestroy()
   }
 
   override fun getMainComponentName(): String = "SmartDreamApp"
