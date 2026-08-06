@@ -364,7 +364,31 @@ export function useAutoLike() {
                       return;
                     }
                     exhaustedRef.current = false;
-                    seenRef.current = new Map();
+                    // ── Preserve seenRef for in-flight / recently-liked links ──
+                    // Wiping the entire map would immediately re-fetch and
+                    // enqueue links that were liked < 12 h ago — the DB
+                    // cooldown rejects them anyway, wasting slots and API
+                    // calls.  Instead, keep entries that are either still
+                    // pending (enqueuedRef / ad-store active+queue) or were
+                    // added in the last SEEN_TTL_MS (12 h).  purgeExpiredSeen
+                    // handles the age-based cleanup; we only need to
+                    // explicitly preserve the in-flight set.
+                    {
+                      const { active: currActive, queue: currQueue } = useAdStore.getState();
+                      const preserveIds = new Set([
+                        ...Array.from(enqueuedRef.current),
+                        ...currActive.map((a) => a.linkId),
+                        ...currQueue.map((q) => q.linkId),
+                      ]);
+                      // Purge expired entries first, then ensure in-flight
+                      // ids are present (with fresh timestamps so they aren't
+                      // immediately cleaned by the next purgeExpiredSeen).
+                      purgeExpiredSeen();
+                      const now = Date.now();
+                      for (const id of preserveIds) {
+                        seenRef.current.set(id, now);
+                      }
+                    }
                     failedRef.current = 0;
                     offsetRef.current = 0;
                     noNewLinksStreakRef.current = 0;
@@ -503,6 +527,33 @@ export function useAutoLike() {
 
     return () => unsub();
   }, []);
+
+  // ── Immediate slot filling on ad_slot_freed event ─────────────────────
+  // When an ad finishes (commit or dismiss), the ad store dispatches
+  // ad_slot_freed so auto-like can fill the newly-vacated slot instantly
+  // instead of waiting up to LOOP_TICK_MS (5 s) for the next loop tick.
+  // This eliminates the visible gap between ad batches and keeps PiP
+  // slots full without relying on heartbeat timing.
+  useEffect(() => {
+    const handleSlotFreed = () => {
+      if (!runningRef.current) return;
+      const { active, queue } = useAdStore.getState();
+      const totalPending = active.length + queue.length;
+      if (localQueueRef.current.length === 0 || totalPending >= MAX_CONCURRENT_ADS) return;
+
+      const needed = MAX_CONCURRENT_ADS - totalPending;
+      const toEnqueue = localQueueRef.current.slice(0, needed);
+      localQueueRef.current = localQueueRef.current.slice(needed);
+
+      for (const link of toEnqueue) {
+        enqueuedRef.current.add(link.id);
+        enqueue(link.id, link.url, MAX_CONCURRENT_ADS);
+      }
+    };
+
+    window.addEventListener("ad_slot_freed", handleSlotFreed);
+    return () => window.removeEventListener("ad_slot_freed", handleSlotFreed);
+  }, [enqueue]);
 
   useEffect(() => {
     // Prefetch the first batch so it's instantly available when the user clicks start!

@@ -7,12 +7,15 @@ import { commitLikeAction, startAdView } from "@/app/actions/like";
 export type ActiveAd = {
   linkId: string;
   url: string;
+  /** 0 = not yet opened; >0 = timestamp when ad was first opened / user tapped
+   *  the heart.  Set by setOpenedAt() — no longer waits for the server. */
   startedAt: number;
   source?: "boosted";
+  /** true while startAdView() is in-flight */
   starting?: boolean;
   startRequestId?: string;
-  /** Ad-view JWT token returned by startAdView — only set after the server
-   * confirms the ad-view start. Until then the timer MUST NOT fire. */
+  /** Ad-view JWT token — only set after the server confirms the ad-view start.
+   *  The 14 s timer starts from `startedAt`, not from when the token arrives. */
   token?: string;
 };
 
@@ -28,20 +31,30 @@ type AdStore = {
   setAdBlockerDetected: (val: boolean) => void;
   enqueue: (linkId: string, url: string, maxSlots?: number, isBoosted?: boolean) => void;
   startNext: () => void;
-  dismiss: (linkId: string) => void;
+  /** Called as soon as the ad is opened (heart tap / auto-open).  Records the
+   *  wall-clock start time so the 14 s window is measured from the moment the
+   *  user actually began viewing, not from when the token round-trip completed. */
+  setOpenedAt: (linkId: string) => void;
+  /** Fetches the ad-view token from the server.  Once the token arrives a
+   *  precise setTimeout is armed for the *remaining* portion of the 14 s
+   *  window (or the ad is committed immediately if the window already expired). */
   markLoaded: (linkId: string) => void;
+  dismiss: (linkId: string) => void;
   clearAll: () => void;
   tickHeartbeat: () => void;
 };
 
 // ── Timer helpers ──────────────────────────────────────────────────────
-// Two complementary mechanisms:
-// 1. Per-ad setTimeout — precise timing in foreground, no race conditions.
+// Three complementary mechanisms:
+// 1. Per-ad setTimeout — precise timing, armed after the token arrives for the
+//    exact remaining portion of the 14 s window (setOpenedAt records the start;
+//    markLoaded arms the precise remaining timer).
 // 2. Safety-net setInterval — catches ads whose setTimeout was throttled
-//    (Chromium throttles background-tab timers to ≥1 min; PiP mode relies
-//    on this fallback).  The interval only fires for ads that are ≥2 s past
-//    their expected completion, so in normal foreground operation it never
-//    fires and setTimeout remains the sole completion path.
+//    (Chromium throttles background-tab timers to ≥1 min; PiP mode relies on
+//    this fallback).  Also catches ads whose token took so long that no
+//    setTimeout was ever armed.
+// 3. tickHeartbeat — called from the native HEARTBEAT message for immediate
+//    overdue checks without waiting for the next safety-net tick.
 
 const timers = new Map<string, ReturnType<typeof setTimeout>>();
 const SAFETY_TICK_MS = 2000;
@@ -56,6 +69,7 @@ function ensureSafetyInterval() {
     const { active } = useAdStore.getState();
     const now = Date.now();
     for (const ad of active) {
+      // Ad whose timer never fired (throttled in background/PiP) — catch it.
       if (
         ad.startedAt > 0 &&
         ad.token &&
@@ -63,8 +77,24 @@ function ensureSafetyInterval() {
         now - ad.startedAt >= SAFETY_OVERDUE_MS
       ) {
         finalisingIds.add(ad.linkId);
-        clearTimer(ad.linkId); // prevent the original (throttled) setTimeout from firing
-        void commitAndFinalise(ad.linkId, ad.token!, ad.source);
+        clearTimer(ad.linkId);
+        void commitAndFinalise(ad.linkId, ad.token, ad.source);
+        continue;
+      }
+      // Ad that opened but NEVER got a token (startAdView permanently failed
+      // or network is down).  After a generous grace period, dismiss it so the
+      // slot is freed instead of being stuck forever.
+      if (
+        ad.startedAt > 0 &&
+        !ad.token &&
+        !ad.starting &&
+        !finalisingIds.has(ad.linkId) &&
+        now - ad.startedAt >= SAFETY_OVERDUE_MS + 10_000 // 16 s total grace
+      ) {
+        console.warn("[safetyNet] Dismissing stuck ad (no token after grace):", ad.linkId);
+        finalisingIds.add(ad.linkId);
+        clearTimer(ad.linkId);
+        useAdStore.getState().dismiss(ad.linkId);
       }
     }
   }, SAFETY_TICK_MS);
@@ -152,6 +182,45 @@ async function commitAndFinalise(
 
   finalisingIds.delete(linkId);
   useAdStore.getState().startNext();
+  // Notify auto-like that a slot freed up so it can fill it immediately
+  // instead of waiting for the next loop tick (up to 5 s delay).
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event("ad_slot_freed"));
+  }
+}
+
+/** Arms a precise setTimeout for the remaining portion of the 14 s window.
+ *  Must only be called after `startedAt` is set AND `token` is available. */
+function armPreciseTimer(linkId: string, token: string, source?: "boosted") {
+  const { active } = useAdStore.getState();
+  const ad = active.find((a) => a.linkId === linkId);
+  if (!ad || ad.startedAt <= 0) return;
+
+  const elapsed = Date.now() - ad.startedAt;
+  const totalWindowMs = TOTAL_AD_SECONDS * 1000;
+  const remaining = Math.max(0, totalWindowMs - elapsed);
+
+  clearTimer(linkId);
+
+  if (remaining <= 0) {
+    // Window already expired — commit immediately
+    if (!finalisingIds.has(linkId)) {
+      finalisingIds.add(linkId);
+      void commitAndFinalise(linkId, token, source);
+    }
+    return;
+  }
+
+  timers.set(
+    linkId,
+    setTimeout(() => {
+      timers.delete(linkId);
+      if (!finalisingIds.has(linkId)) {
+        finalisingIds.add(linkId);
+        void commitAndFinalise(linkId, token, source);
+      }
+    }, remaining),
+  );
 }
 
 // ── Store ───────────────────────────────────────────────────────────────
@@ -215,10 +284,33 @@ export const useAdStore = create<AdStore>((set, get) => {
       ensureSafetyInterval();
     },
 
+    /** Records the wall-clock time when the ad was first opened (heart tap or
+     *  auto-open).  The 14 s window is measured from this moment — NOT from
+     *  when the server token arrives.  This is called BEFORE the token is
+     *  fetched so the UI can show an accurate countdown immediately. */
+    setOpenedAt: (linkId) => {
+      const { active } = get();
+      const ad = active.find((a) => a.linkId === linkId);
+      if (!ad || ad.startedAt > 0) return; // already opened
+
+      const openedAt = Date.now();
+      set((s) => ({
+        active: s.active.map((a) =>
+          a.linkId === linkId ? { ...a, startedAt: openedAt } : a,
+        ),
+      }));
+    },
+
+    /** Fetches the ad-view token from the server.  Once the token arrives,
+     *  a precise setTimeout is armed for the *remaining* portion of the 14 s
+     *  window — the timer starts from when `setOpenedAt` was called, not from
+     *  when this function returns. */
     markLoaded: (linkId) => {
       const { active } = get();
       const ad = active.find((a) => a.linkId === linkId);
-      if (!ad || ad.startedAt !== 0 || ad.starting) return;
+      // Must be in active, must have been opened (setOpenedAt called), must
+      // not already be fetching a token, and must not already have one.
+      if (!ad || ad.startedAt <= 0 || ad.starting || ad.token) return;
 
       const startRequestId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
       set((s) => ({
@@ -229,48 +321,47 @@ export const useAdStore = create<AdStore>((set, get) => {
 
       (async () => {
         try {
-          const result = await startAdView(linkId, ad.source);
+          // Pass the client's actual ad-open time so the server can verify the
+          // full 14 s elapsed, rather than measuring from server-receive time.
+          const clientStartedAtMs = ad.startedAt;
+          const result = await startAdView(linkId, ad.source, clientStartedAtMs);
           const current = get().active.find((a) => a.linkId === linkId);
           if (!current || current.startRequestId !== startRequestId) return;
 
           if (!("token" in result)) {
-            console.warn('[markLoaded] startAdView rejected:', linkId, result.error);
+            console.warn("[markLoaded] startAdView rejected:", linkId, result.error);
             set((s) => ({
               active: s.active.filter((a) => a.linkId !== linkId),
             }));
             get().startNext();
+            if (typeof window !== "undefined") {
+              window.dispatchEvent(new Event("ad_slot_freed"));
+            }
             return;
           }
 
-          const viewStartMs = Date.now();
           set((s) => ({
             active: s.active.map((a) =>
               a.linkId === linkId
-                ? { ...a, startedAt: viewStartMs, starting: false, startRequestId: undefined, token: result.token }
+                ? { ...a, starting: false, startRequestId: undefined, token: result.token }
                 : a,
             ),
           }));
 
-          clearTimer(linkId);
-          timers.set(
-            linkId,
-            setTimeout(() => {
-              timers.delete(linkId);
-              if (!finalisingIds.has(linkId)) {
-                finalisingIds.add(linkId);
-                void commitAndFinalise(linkId, result.token, ad.source);
-              }
-            }, TOTAL_AD_SECONDS * 1000),
-          );
+          // Arm the precise timer for the remaining portion of the 14 s window.
+          armPreciseTimer(linkId, result.token, ad.source);
         } catch (err) {
           const current = get().active.find((a) => a.linkId === linkId);
           if (!current || current.startRequestId !== startRequestId) return;
-          console.error('[markLoaded] startAdView failed for linkId:', linkId, err);
+          console.error("[markLoaded] startAdView failed for linkId:", linkId, err);
           clearTimer(linkId);
           set((s) => ({
             active: s.active.filter((a) => a.linkId !== linkId),
           }));
           get().startNext();
+          if (typeof window !== "undefined") {
+            window.dispatchEvent(new Event("ad_slot_freed"));
+          }
         }
       })();
     },
@@ -280,6 +371,9 @@ export const useAdStore = create<AdStore>((set, get) => {
       finalisingIds.delete(linkId);
       set((s) => ({ active: s.active.filter((a) => a.linkId !== linkId) }));
       get().startNext();
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event("ad_slot_freed"));
+      }
     },
 
     clearAll: () => {

@@ -87,7 +87,11 @@ export function AdContainer() {
           for (const msg of valid) {
             if (msg.type === "AD_LOADED") {
               const ad = useAdStore.getState().active.find((a) => a.linkId === msg.linkId);
-              if (ad && ad.startedAt === 0) {
+              if (ad) {
+                // markLoaded is idempotent — it checks startedAt/token/starting
+                // internally, so it's safe to call unconditionally here.
+                // Previously the startedAt===0 guard prevented it from ever
+                // firing because setOpenedAt runs before OPEN_AD is posted.
                 useAdStore.getState().markLoaded(msg.linkId);
               }
             } else if (msg.type === "AD_DISMISSED") {
@@ -174,6 +178,7 @@ function AdModal({
   index?: number;
 }) {
   const markLoaded = useAdStore((s) => s.markLoaded);
+  const setOpenedAt = useAdStore((s) => s.setOpenedAt);
   const dismiss = useAdStore((s) => s.dismiss);
   const [now, setNow] = useState(Date.now());
   const [showAdOverlay, setShowAdOverlay] = useState(false);
@@ -195,20 +200,27 @@ function AdModal({
   const viewRemaining = Math.max(0, AD_VIEW_SECONDS - (elapsedCapped - AD_LOADING_SECONDS));
 
   const handleOpenAd = useCallback(() => {
+    // Record the wall-clock time when the ad is first opened.  The 14 s
+    // window is measured from this moment — the server token is fetched
+    // asynchronously and the precise remaining timer is armed once it arrives.
+    const openedAt = Date.now();
+
     if (typeof window !== "undefined" && (window as any).ReactNativeWebView) {
       // Running inside Android App wrapper
+      useAdStore.getState().setOpenedAt(linkId);
+
       (window as any).ReactNativeWebView.postMessage(
         JSON.stringify({
           type: "OPEN_AD",
           url: url,
           linkId: linkId,
+          startedAt: openedAt, // native uses this for visual timer sync
         })
       );
       // Don't call markLoaded here — the native WebView's onLoadEnd will
-      // dispatch AD_LOADED which triggers markLoaded. A 3-second fallback
-      // timeout (registered below) catches the case where AD_LOADED never
-      // arrives. Calling markLoaded synchronously here creates a race where
-      // both this call and the AD_LOADED handler can fire markLoaded.
+      // dispatch AD_LOADED which triggers markLoaded (token fetch). A 3 s
+      // fallback timeout (registered below) catches the case where AD_LOADED
+      // never arrives.
       return true;
     }
 
@@ -220,6 +232,7 @@ function AdModal({
     }
     setShowAdOverlay(true);
     if (startedAt === 0) {
+      useAdStore.getState().setOpenedAt(linkId);
       markLoaded(linkId);
     }
     return true;
@@ -238,17 +251,18 @@ function AdModal({
   // Safety net: Native's AD_LOADED can be lost forever — a dead link, a
   // redirect loop, or Native silently evicting this ad from its own 3-slot
   // queue (see MobileApp/App.tsx onMainMessage) all leave nothing to ever
-  // call markLoaded. Without a timeout the slot stays stuck permanently,
-  // since only a manual tap on Native's close button frees it. Proceed after
-  // a grace period, same as the desktop path which never waits for
-  // load confirmation at all.
+  // call markLoaded. Without a timeout the token is never fetched, and the
+  // slot stays stuck permanently since only a manual tap on Native's close
+  // button frees it.  Proceed after a grace period to fetch the token
+  // regardless — markLoaded is idempotent (checks starting/token before
+  // proceeding).
   useEffect(() => {
-    if (!isNativeApp || startedAt !== 0) return;
+    if (!isNativeApp) return;
     const fallback = setTimeout(() => {
       markLoaded(linkId);
     }, AD_LOAD_FALLBACK_MS);
     return () => clearTimeout(fallback);
-  }, [isNativeApp, startedAt, linkId, markLoaded]);
+  }, [isNativeApp, linkId, markLoaded]);
 
   // Tell Native app to close its modal when this React component unmounts
   useEffect(() => {
@@ -306,14 +320,22 @@ function AdModal({
             }),
           );
         }
+        // Prompt auto-like to fill any empty slots immediately.  In PiP
+        // the native visual timer may have dismissed ads and AD_DISMISSED
+        // could arrive concurrently — this ensures slots don't stay empty
+        // between heartbeat ticks.
+        window.dispatchEvent(new Event("ad_slot_freed"));
       }
 
       if (data.type === "AD_DISMISSED" && data.linkId === linkId) {
         dismiss(linkId);
       } else if (data.type === "AD_LOADED" && data.linkId === linkId) {
-        if (startedAt === 0) {
-          markLoaded(linkId);
-        }
+        // markLoaded is idempotent — it checks startedAt/token/starting
+        // internally.  Previously the startedAt===0 guard prevented this
+        // from ever firing in native mode because setOpenedAt runs before
+        // OPEN_AD is posted, so startedAt is always >0 by the time the
+        // native ad WebView finishes loading and dispatches AD_LOADED.
+        markLoaded(linkId);
       }
     };
     window.addEventListener("message", handleNativeMessage);
