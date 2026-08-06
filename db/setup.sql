@@ -370,11 +370,11 @@ BEGIN
       ELSE FALSE
     END AS is_slowdown,
     NOW()
-  FROM user_stats us
-  WHERE us.is_elite
+  FROM user_stats us;
+  /* WHERE us.is_elite
      OR us.is_boosted
      OR (EXTRACT(EPOCH FROM (NOW() - us.profile_created_at)) < 86400 AND us.recv_total < v_active_like_count)
-     OR (us.given_24h >= v_active_like_count AND us.recv_24h <= us.given_24h);
+     OR (us.given_24h >= v_active_like_count AND us.recv_24h <= us.given_24h); */
 END;
 $$;
 
@@ -532,7 +532,7 @@ BEGIN
       RETURN 0;
     END IF;
 
-    IF NOT (COALESCE(v_o_elite, FALSE) OR COALESCE(v_o_boosted, FALSE)) THEN
+    /* IF NOT (COALESCE(v_o_elite, FALSE) OR COALESCE(v_o_boosted, FALSE)) THEN
       SELECT COUNT(*) INTO v_owner_recv_total
       FROM likes WHERE receiver_id = p_receiver_id AND NOT is_boosted_like;
 
@@ -556,7 +556,7 @@ BEGIN
           RETURN 0;
         END IF;
       END IF;
-    END IF;
+    END IF; */
 
     -- 3. Insert the like
     INSERT INTO likes (liker_id, link_id, receiver_id, is_anonymous, is_boosted_like, created_at)
