@@ -533,10 +533,10 @@ export async function GET(request: NextRequest) {
       var viewW = window.innerWidth;
       var viewH = window.innerHeight;
       if (contentW <= 0 || contentH <= 0 || viewW <= 0 || viewH <= 0) return;
-      // Scale to fill (cover-style), preserving aspect ratio
+      // Scale to fit (contain-style), preserving aspect ratio
       var scaleX = viewW / contentW;
       var scaleY = viewH / contentH;
-      var scale = Math.max(scaleX, scaleY);
+      var scale = Math.min(scaleX, scaleY);
       // Don't scale if already nearly filling (within 5%)
       if (scale > 0.95 && scale < 1.05) return;
       body.style.transformOrigin = 'top left';

@@ -306,12 +306,12 @@ function App(): React.JSX.Element {
   // Background heartbeat: keep web WebView timers alive
   useEffect(() => {
     const interval = setInterval(() => {
-      if (appStateRef.current === 'background' || appStateRef.current === 'inactive') {
+      if (appStateRef.current === 'background' || appStateRef.current === 'inactive' || isInPiP) {
         dispatchToWeb({ type: 'HEARTBEAT' });
       }
     }, 1000);
     return () => clearInterval(interval);
-  }, [dispatchToWeb]);
+  }, [dispatchToWeb, isInPiP]);
 
   // ── WebView error / retry ─────────────────────────────────────────────
   const handleQuit = () => {
