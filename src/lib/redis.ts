@@ -74,3 +74,24 @@ export async function cacheDel(...keys: string[]): Promise<void> {
     console.error("[redis] cacheDel failed", (err as Error).message);
   }
 }
+
+/** Delete all keys matching a glob pattern (e.g. `feed:user123:*`).
+ *  Uses SCAN so it won't block Redis on large key spaces. */
+export async function cacheDelPattern(pattern: string): Promise<void> {
+  try {
+    let cursor = "0";
+    do {
+      const [nextCursor, keys] = await redis.scan(
+        cursor,
+        "MATCH", pattern,
+        "COUNT", 100,
+      );
+      cursor = nextCursor;
+      if (keys.length > 0) {
+        await redis.del(...keys);
+      }
+    } while (cursor !== "0");
+  } catch (err) {
+    console.error("[redis] cacheDelPattern failed for", pattern, (err as Error).message);
+  }
+}

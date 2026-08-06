@@ -4,6 +4,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { getSettings } from "@/lib/settings";
 import { issueAdViewToken, verifyAdViewToken, consumeAdViewToken } from "@/lib/ad-view-token";
 import { checkRateLimit } from "@/lib/rate-limit";
+import { cacheDelPattern } from "@/lib/redis";
 import { bangladeshMidnightISO } from "@/lib/timezone";
 import { TOTAL_AD_SECONDS } from "@/lib/types";
 import { getLinkOwner } from "@/lib/repos/links";
@@ -131,6 +132,11 @@ export async function commitLikeAction(
     publishStatsUpdate(receiver_id),
     publishLinksUpdate(receiver_id),
   ]);
+
+  // Invalidate the liker's feed cache so the just-liked link disappears
+  // immediately on page refresh — the Redis feed cache (15s TTL) otherwise
+  // serves stale data that still includes this link.
+  await cacheDelPattern(`feed:${user.id}:*`);
 
   console.log("[commitLikeAction] SUCCESS for link:", linkId);
   return { ok: true };
