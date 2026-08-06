@@ -118,23 +118,16 @@ export function useAutoLike() {
           offsetRef.current = 0;
         }
       }
-      // Only declare real exhaustion if even after resetting non-pending seenRef items there are still zero new links
+      // Three consecutive short (<50) fetches at offset 0 with nothing new
+      // means every currently-eligible link (the DB query already excludes
+      // anything on this viewer's 12h cooldown) has already been seen this
+      // session -- genuinely exhausted. Do NOT wipe seenRef's non-pending
+      // entries here to force a retry: purgeExpiredSeen() above already ages
+      // them out exactly when their 12h cooldown lifts, so an early wipe
+      // would just re-enqueue links the DB is guaranteed to reject again,
+      // burning ad slots on views that can never be credited.
       if (links.length < 50 && offset === 0 && noNewLinksStreakRef.current >= 3) {
-        const { active: currentActive, queue: currentQueue } = useAdStore.getState();
-        const pendingIds = new Set([
-          ...Array.from(enqueuedRef.current),
-          ...currentActive.map((a) => a.linkId),
-          ...currentQueue.map((q) => q.linkId),
-        ]);
-        if (seenRef.current.size > pendingIds.size) {
-          seenRef.current = new Map();
-          for (const id of pendingIds) {
-            seenRef.current.set(id, Date.now());
-          }
-          noNewLinksStreakRef.current = 0;
-        } else {
-          exhaustedRef.current = true;
-        }
+        exhaustedRef.current = true;
       }
 
       fetchFailStreakRef.current = 0;
