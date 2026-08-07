@@ -19,7 +19,7 @@ export type Locale = "en" | "bn";
 export const LOCALES: Locale[] = ["en", "bn"];
 export const DEFAULT_LOCALE: Locale = "en";
 
-export const MAX_LINKS_PER_USER = 50;
+export const MAX_LINKS_PER_USER = 20;
 export const AD_LOADING_SECONDS = 4;
 export const AD_VIEW_SECONDS = 10;
 export const TOTAL_AD_SECONDS = AD_LOADING_SECONDS + AD_VIEW_SECONDS; // 14s total

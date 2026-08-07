@@ -10,6 +10,7 @@ import { TOTAL_AD_SECONDS, LINK_COOLDOWN_HOURS } from "@/lib/types";
 import { getLinkOwner } from "@/lib/repos/links";
 import { processLikeCommit } from "@/lib/repos/rpc";
 import { publishLinksUpdate, publishStatsUpdate } from "@/lib/realtime-publish";
+import { pool } from "@/lib/db";
 
 // Legitimate ceiling: the client runs at most MAX_CONCURRENT_ADS (3) ad slots
 // at once, each cycling roughly every TOTAL_AD_SECONDS (14s) plus network/UI
@@ -43,6 +44,28 @@ export async function startAdView(
   const link = await getLinkOwner(linkId);
   if (!link || link.user_id === user.id) {
     return { error: "invalid link" };
+  }
+
+  // --- Real-time Deficit Check ---
+  // The feed cache can lag by 120s. If the owner has fallen into deficit during this lag,
+  // we instantly reject the view here to prevent the liker from wasting 14 seconds.
+  const settings = await getSettings();
+  const deficitRes = await pool.query<{ is_deficit: boolean }>(`
+    WITH owner_stats AS (
+      SELECT
+        EXTRACT(EPOCH FROM (NOW() - (SELECT created_at FROM profiles WHERE id = $1))) < 86400 AS is_new_profile,
+        COALESCE((SELECT COUNT(*) FROM likes WHERE receiver_id = $1 AND NOT is_boosted_like), 0) AS recv_total,
+        COALESCE((SELECT COUNT(*) FROM likes WHERE receiver_id = $1 AND NOT is_boosted_like AND created_at >= NOW() - ($2 || ' hours')::INTERVAL), 0) AS recv_24h,
+        COALESCE((SELECT COUNT(*) FROM likes WHERE liker_id = $1 AND created_at >= NOW() - ($2 || ' hours')::INTERVAL), 0) AS given_24h
+    )
+    SELECT
+      NOT (is_new_profile AND recv_total < $3) -- NOT in grace period
+      AND (recv_24h > given_24h) AS is_deficit
+    FROM owner_stats;
+  `, [link.user_id, settings.activeWindowHours, settings.activeLikeCount]);
+
+  if (deficitRes.rows[0]?.is_deficit) {
+    return { error: "owner_deficit" };
   }
 
   // Sanity-check the client-provided timestamp: not in the future, not too stale.

@@ -26,6 +26,7 @@ type AdStore = {
   queue: QueuedAd[];
   committed: Record<string, number>;
   viewed: Record<string, number>;
+  skipped: Set<string>;
   maxSlots: number;
   adBlockerDetected: boolean;
   setAdBlockerDetected: (val: boolean) => void;
@@ -240,6 +241,7 @@ export const useAdStore = create<AdStore>((set, get) => {
     queue: [],
     committed: {},
     viewed: {},
+    skipped: new Set(),
     maxSlots: MAX_CONCURRENT_ADS,
     adBlockerDetected: false,
     setAdBlockerDetected: (val) => set({ adBlockerDetected: val }),
@@ -332,9 +334,14 @@ export const useAdStore = create<AdStore>((set, get) => {
 
           if (!("token" in result)) {
             console.warn("[markLoaded] startAdView rejected:", linkId, result.error);
-            set((s) => ({
-              active: s.active.filter((a) => a.linkId !== linkId),
-            }));
+            set((s) => {
+              const newSkipped = new Set(s.skipped);
+              newSkipped.add(linkId);
+              return {
+                active: s.active.filter((a) => a.linkId !== linkId),
+                skipped: newSkipped,
+              };
+            });
             get().startNext();
             if (typeof window !== "undefined") {
               window.dispatchEvent(new Event("ad_slot_freed"));

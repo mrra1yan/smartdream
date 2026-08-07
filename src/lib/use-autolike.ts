@@ -322,6 +322,7 @@ export function useAutoLike() {
           if (!isPending) {
             enqueuedRef.current.delete(linkId);
             if (currentCommitted[linkId]) likedCountRef.current++;
+            else if (useAdStore.getState().skipped.has(linkId)) { /* do nothing */ }
             else failedRef.current++;
           }
         }
@@ -491,7 +492,7 @@ export function useAutoLike() {
       )
         return;
 
-      const { active: currentActive, queue: currentQueue, committed: currentCommitted } = state;
+      const { active: currentActive, queue: currentQueue, committed: currentCommitted, skipped: currentSkipped } = state;
 
       let dirty = false;
       for (const linkId of Array.from(enqueuedRef.current)) {
@@ -501,6 +502,7 @@ export function useAutoLike() {
         if (!isPending) {
           enqueuedRef.current.delete(linkId);
           if (currentCommitted[linkId]) likedCountRef.current++;
+          else if (currentSkipped.has(linkId)) { /* do nothing */ }
           else failedRef.current++;
           dirty = true;
         }

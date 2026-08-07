@@ -374,7 +374,7 @@ BEGIN
   WHERE us.is_elite
      OR us.is_boosted
      OR (EXTRACT(EPOCH FROM (NOW() - us.profile_created_at)) < 86400 AND us.recv_total < v_active_like_count)
-     OR (us.given_24h >= 1 AND us.recv_24h <= us.given_24h + v_active_like_count);
+     OR (us.given_24h >= v_active_like_count AND us.recv_24h <= us.given_24h);
 END;
 $$;
 
@@ -549,7 +549,10 @@ BEGIN
         SELECT COUNT(*) INTO v_owner_recv_24h
         FROM likes WHERE receiver_id = p_receiver_id AND NOT is_boosted_like AND created_at >= v_window_start;
 
-        IF COALESCE(v_owner_recv_24h, 0) > COALESCE(v_owner_given_24h, 0) + p_active_like_count THEN
+        IF COALESCE(v_owner_recv_24h, 0) > COALESCE(v_owner_given_24h, 0) THEN
+          -- Instant Cache Eviction: Owner is in deficit, remove from feed cache immediately
+          DELETE FROM feed_eligibility_cache WHERE user_id = p_receiver_id;
+
           PERFORM pg_advisory_unlock(v_lock_pair);
           PERFORM pg_advisory_unlock(v_lock_recv);
           PERFORM pg_advisory_unlock(v_lock_liker);
@@ -564,6 +567,19 @@ BEGIN
 
     -- 4. Increment link likes_count
     UPDATE links SET likes_count = COALESCE(likes_count, 0) + 1 WHERE id = p_link_id;
+
+    -- Instant Cache Eviction: If this like pushes the owner into deficit or ends their grace period, remove them immediately
+    IF NOT (COALESCE(v_o_elite, FALSE) OR COALESCE(v_o_boosted, FALSE)) THEN
+      IF NOT v_is_new_user THEN
+        IF (COALESCE(v_owner_recv_24h, 0) + 1 > COALESCE(v_owner_given_24h, 0)) THEN
+          DELETE FROM feed_eligibility_cache WHERE user_id = p_receiver_id;
+        END IF;
+      ELSE
+        IF (COALESCE(v_owner_recv_total, 0) + 1 >= p_active_like_count) THEN
+          DELETE FROM feed_eligibility_cache WHERE user_id = p_receiver_id;
+        END IF;
+      END IF;
+    END IF;
 
     -- 5. Liker auto-like usage
     SELECT auto_like_enabled, auto_like_paused, auto_like_model, auto_like_expiry,
