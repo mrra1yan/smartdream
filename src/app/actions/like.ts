@@ -53,13 +53,17 @@ export async function startAdView(
   const deficitRes = await pool.query<{ is_deficit: boolean }>(`
     WITH owner_stats AS (
       SELECT
-        EXTRACT(EPOCH FROM (NOW() - (SELECT created_at FROM profiles WHERE id = $1))) < 86400 AS is_new_profile,
+        is_elite,
+        is_boosted,
+        EXTRACT(EPOCH FROM (NOW() - created_at)) < 86400 AS is_new_profile,
         COALESCE((SELECT COUNT(*) FROM likes WHERE receiver_id = $1 AND NOT is_boosted_like), 0) AS recv_total,
         COALESCE((SELECT COUNT(*) FROM likes WHERE receiver_id = $1 AND NOT is_boosted_like AND created_at >= NOW() - ($2 || ' hours')::INTERVAL), 0) AS recv_24h,
         COALESCE((SELECT COUNT(*) FROM likes WHERE liker_id = $1 AND created_at >= NOW() - ($2 || ' hours')::INTERVAL), 0) AS given_24h
+      FROM profiles WHERE id = $1
     )
     SELECT
-      NOT (is_new_profile AND recv_total < $3) -- NOT in grace period
+      NOT (is_elite OR is_boosted) -- Elite/Boosted are EXEMPT
+      AND NOT (is_new_profile AND recv_total < $3) -- NOT in grace period
       AND (recv_24h > given_24h) AS is_deficit
     FROM owner_stats;
   `, [link.user_id, settings.activeWindowHours, settings.activeLikeCount]);
