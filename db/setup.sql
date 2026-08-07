@@ -374,7 +374,7 @@ BEGIN
   WHERE us.is_elite
      OR us.is_boosted
      OR (EXTRACT(EPOCH FROM (NOW() - us.profile_created_at)) < 86400 AND us.recv_total < v_active_like_count)
-     OR (us.given_24h >= v_active_like_count AND us.recv_24h <= us.given_24h);
+     OR (us.given_24h >= 1 AND us.recv_24h <= us.given_24h + v_active_like_count);
 END;
 $$;
 
@@ -549,7 +549,7 @@ BEGIN
         SELECT COUNT(*) INTO v_owner_recv_24h
         FROM likes WHERE receiver_id = p_receiver_id AND NOT is_boosted_like AND created_at >= v_window_start;
 
-        IF COALESCE(v_owner_recv_24h, 0) > COALESCE(v_owner_given_24h, 0) THEN
+        IF COALESCE(v_owner_recv_24h, 0) > COALESCE(v_owner_given_24h, 0) + p_active_like_count THEN
           PERFORM pg_advisory_unlock(v_lock_pair);
           PERFORM pg_advisory_unlock(v_lock_recv);
           PERFORM pg_advisory_unlock(v_lock_liker);
